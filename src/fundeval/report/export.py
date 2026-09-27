@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from fundeval.report.summary import SECTIONS, EvaluationReport, conclusion, format_value
+from fundeval.report.summary import SECTIONS, STYLE_CAVEAT, EvaluationReport, conclusion, format_value
 
 
 def _md_escape(value) -> str:
@@ -35,8 +35,31 @@ def _regression_display(report: EvaluationReport) -> pd.DataFrame:
     return out
 
 
+def _robustness_display(report: EvaluationReport) -> pd.DataFrame:
+    tbl = report.robustness_table()
+    if tbl.empty:
+        return tbl
+    out = tbl.copy()
+    for col in ("全样本估计", "剔除后估计"):
+        out[col] = out[col].map(lambda v: f"{v:.6f}")
+    for col in ("全样本 t", "剔除后 t"):
+        out[col] = out[col].map(lambda v: f"{v:.4f}")
+    for col in ("全样本 n", "剔除后 n"):
+        out[col] = out[col].map(lambda v: "—" if pd.isna(v) else f"{int(v)}")
+    return out
+
+
+def _rolling_style_display(report: EvaluationReport) -> pd.DataFrame:
+    roll = report.style_rolling
+    out = roll.weights.apply(lambda col: col.map(lambda v: f"{v * 100:.1f}%"))  # DataFrame.map 需 pandas 2.1
+    out["R²"] = roll.r_squared.map(lambda v: f"{v:.3f}")
+    out.index = out.index.strftime("%Y-%m-%d") if isinstance(out.index, pd.DatetimeIndex) else out.index
+    return out.rename_axis("窗口末期").reset_index()
+
+
 def to_markdown(report: EvaluationReport, path: str | Path | None = None) -> str:
-    """生成 Markdown 报告：标题、口径、各维度指标表、回归系数表、数据质量、结论与未完成检验。
+    """生成 Markdown 报告：标题、口径、各维度指标表（含收益来源）、回归系数表、滚动风格权重、
+    稳健性检验、数据质量、结论与未完成检验。
 
     ``path`` 给出时同时写入文件（UTF-8）。返回 Markdown 文本。
     回归系数为每期值（与输入收益同频），未换算为百分数。
@@ -50,6 +73,17 @@ def to_markdown(report: EvaluationReport, path: str | Path | None = None) -> str
     reg = _regression_display(report)
     if not reg.empty:
         parts += ["", "## 回归系数", "", "系数为每期值，与输入收益同频。", "", _md_table(reg)]
+    if report.style_rolling is not None:
+        parts += [
+            "", f"## 滚动风格权重（窗口 {report.style_rolling.window} 期）", "",
+            f"按窗口末期排列。{STYLE_CAVEAT}；权重变化只提示进一步检查持仓与投资授权。", "",
+            _md_table(_rolling_style_display(report)),
+        ]
+    if report.robustness is not None:
+        parts += ["", "## 稳健性：剔除异常期", "", report.robustness.summary()]
+        rob = _robustness_display(report)
+        if not rob.empty:
+            parts += ["", "异常期取自数据质量报告（组合、基准或市场任一被标记即剔除）；系数为每期值。", "", _md_table(rob)]
     parts += ["", "## 数据质量", "", _md_table(report.quality.summary())]
     issues = report.quality.issues()
     if issues:
@@ -64,8 +98,36 @@ def to_markdown(report: EvaluationReport, path: str | Path | None = None) -> str
     return text
 
 
+def _style_sheet(report: EvaluationReport, writer) -> None:
+    st = report.style
+    k = report.periods_per_year
+    summary = pd.DataFrame(
+        [
+            ("R²", st.r_squared),
+            ("残差均值（每期）", st.residual_mean),
+            ("残差均值（算术年化）", st.annualized_residual_mean(k)),
+            ("残差年化波动", st.annualized_residual_volatility(k)),
+            ("样本期数 n", st.n),
+            ("目标函数", "最小化残差方差" if st.objective == "variance" else "最小化残差平方和"),
+            ("说明", STYLE_CAVEAT),
+        ],
+        columns=["项目", "数值"],
+    )
+    st.table().to_excel(writer, sheet_name="风格分析", index=False)
+    row = len(st.weights) + 2
+    summary.to_excel(writer, sheet_name="风格分析", index=False, startrow=row)
+    if report.style_rolling is not None:
+        roll = report.style_rolling.table()
+        roll.index = roll.index.strftime("%Y-%m-%d") if isinstance(roll.index, pd.DatetimeIndex) else roll.index
+        roll.index.name = f"窗口末期（窗口 {report.style_rolling.window} 期）"
+        roll.to_excel(writer, sheet_name="风格分析", startrow=row + len(summary) + 3)
+
+
 def to_excel(report: EvaluationReport, path: str | Path) -> Path:
-    """写入 Excel（openpyxl），分 sheet：口径、指标、回归、期间收益、数据质量。
+    """写入 Excel（openpyxl），分 sheet：口径、指标、回归、稳健性、风格分析、期间收益、数据质量。
+
+    风格分析 sheet 先列全样本权重、R² 与残差统计，其下为滚动权重（给出 style_window 时）；
+    稳健性 sheet 为剔除异常期前后的关键系数与说明。
 
     指标 sheet 保存原始数值（小数）与单位，另附格式化后的显示值；期间收益 sheet 为对齐后的
     单期收益、主动收益与财富指数。需要安装 ``fundeval[excel]``。
@@ -96,6 +158,13 @@ def to_excel(report: EvaluationReport, path: str | Path) -> Path:
         scope.to_excel(writer, sheet_name="口径", index=False)
         metrics.to_excel(writer, sheet_name="指标", index=False)
         regression.to_excel(writer, sheet_name="回归", index=False)
+        if report.robustness is not None:
+            pd.DataFrame({"说明": [report.robustness.summary()]}).to_excel(writer, sheet_name="稳健性", index=False)
+            rob = report.robustness_table()
+            if not rob.empty:
+                rob.to_excel(writer, sheet_name="稳健性", index=False, startrow=3)
+        if report.style is not None:
+            _style_sheet(report, writer)
         data.to_excel(writer, sheet_name="期间收益")
         quality.to_excel(writer, sheet_name="数据质量", index=False)
         issues.to_excel(writer, sheet_name="数据质量", index=False, startrow=len(quality) + 2)

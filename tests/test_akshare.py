@@ -3,6 +3,7 @@
 CI 不访问网络；标记为 network 的冒烟测试默认跳过，本地用 ``pytest -m network`` 运行。
 """
 
+import contextlib
 import sys
 import warnings
 
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from fundeval.etl import benchmark as bm
 from fundeval.etl import quality
 from fundeval.etl.returns import price_to_returns
 from fundeval.etl.sources import akshare as aks
@@ -279,11 +281,23 @@ def net_kw(tmp_path):
     return {"cache_dir": tmp_path}
 
 
-def _connection_errors():
+def _unreachable_errors():
+    """联网测试统一的“数据源不可达”判定：连接类与超时类异常时 skip，其余（列名、格式、数值）仍判失败。
+
+    requests.ConnectionError 含 ConnectTimeout、ProxyError、SSLError；requests.Timeout 含 ReadTimeout；
+    内置 ConnectionError 含连接重置与 DataSourceUnavailable；UpstreamTimeout 为总时限超时。
+    """
     import requests
 
-    # requests.ConnectionError 含 ConnectTimeout、ProxyError、SSLError；内置 ConnectionError 含连接重置
-    return (requests.exceptions.ConnectionError, ConnectionError)
+    return (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError, aks.UpstreamTimeout)
+
+
+@contextlib.contextmanager
+def skip_if_unreachable(what: str):
+    try:
+        yield
+    except _unreachable_errors() as exc:
+        pytest.skip(f"{what} 无法连接或超时（{type(exc).__name__}: {exc}），跳过")
 
 
 @pytest.mark.network
@@ -295,8 +309,12 @@ def test_network_fund(net_kw):
 
 @pytest.mark.network
 def test_network_index_eastmoney(net_kw):
-    """东方财富指数行情 index_zh_a_hist；指定 source="em"，不让自动切换掩盖故障。"""
-    r = aks.index_returns("000300", NET_START, NET_END, source="em", **net_kw)
+    """东方财富指数行情 index_zh_a_hist；指定 source="em"，不让自动切换掩盖故障。
+
+    连接类或超时类异常时 skip 并注明原因；列名、格式或数值错误仍然算失败。
+    """
+    with skip_if_unreachable("东方财富 index_zh_a_hist"):
+        r = aks.index_returns("000300", NET_START, NET_END, source="em", **net_kw)
     assert len(r) > 40 and r.attrs["source"] == "em"
 
 
@@ -312,20 +330,22 @@ def test_network_index_csindex(net_kw):
 def test_network_chinabond(net_kw):
     """中债综合财富指数（yield.chinabond.com.cn）。
 
-    该网站在部分网络环境下无法建立连接：连接类异常时 skip 并注明原因；
+    该网站在部分网络环境下无法建立连接：连接类或超时类异常时 skip 并注明原因；
     数据格式或列名错误（AkshareInterfaceError 等）仍然算失败。
     """
-    try:
+    with skip_if_unreachable("中债网站 yield.chinabond.com.cn"):
         r = aks.index_returns("cbond:composite", NET_START, NET_END, **net_kw)
-    except _connection_errors() as exc:
-        pytest.skip(f"中债网站 yield.chinabond.com.cn 无法建立连接（{type(exc).__name__}: {exc}），跳过")
     assert len(r) > 40 and r.attrs["source"] == "cbond"
 
 
 @pytest.mark.network
 def test_network_shibor(net_kw):
-    """Shibor 3M（rate_interbank，一次调用约翻 10 页，按默认的单请求超时应能完成）。"""
-    rf = aks.risk_free_returns(NET_START, NET_END, "M", source="shibor3m", **net_kw)
+    """Shibor 3M（rate_interbank，一次调用约翻 10 页，按默认的单请求超时应能完成）。
+
+    连接类或超时类异常时 skip 并注明原因；列名、格式或数值错误仍然算失败。
+    """
+    with skip_if_unreachable("Shibor rate_interbank"):
+        rf = aks.risk_free_returns(NET_START, NET_END, "M", source="shibor3m", **net_kw)
     assert rf.notna().all() and rf.attrs["source"] == "shibor3m"
 
 
@@ -352,3 +372,74 @@ def test_network_total_return_benchmark_removes_dividend_alpha(tmp_path):
     assert rep.n >= 55
     assert abs(rep.capm.annualized_alpha(12)) < 0.01
     assert abs(rep.capm.alpha_t) < 2
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        __import__("requests").exceptions.ConnectionError("proxy refused"),
+        __import__("requests").exceptions.ReadTimeout("Read timed out"),
+        ConnectionError("Remote end closed connection without response"),
+        aks.UpstreamTimeout("超过总时限"),
+    ],
+)
+def test_network_skip_rule_skips_connection_and_timeout_errors(exc):
+    """联网测试的统一判定（离线核对）：连接类、超时类异常转为 skip。"""
+    with pytest.raises(pytest.skip.Exception, match="无法连接或超时"):
+        with skip_if_unreachable("测试数据源"):
+            raise exc
+
+
+@pytest.mark.parametrize("exc", [aks.AkshareInterfaceError("缺少列 收盘"), KeyError("data"), ValueError("格式")])
+def test_network_skip_rule_keeps_format_errors_as_failures(exc):
+    with pytest.raises(type(exc)):
+        with skip_if_unreachable("测试数据源"):
+            raise exc
+
+
+@pytest.mark.network
+def test_network_style_indices_csindex(net_kw):
+    """风格指数（中证指数官网）：沪深300成长 / 价值、中证红利的全收益与价格指数，2024 年差异与分红相符；
+    中证2000 价格指数可取。数值为 2026-09-27 在中证官网实测的 2024 年收益。"""
+    expected = {  # 代码: (价格指数 2024 收益, 全收益 2024 收益)
+        "000918": (0.0424, 0.0691),
+        "000919": (0.2485, 0.3084),
+        "000922": (0.1231, 0.1876),
+    }
+    kw = dict(freq="A", source="csindex", **net_kw)
+    for price_code, (price_ret, total_ret) in expected.items():
+        total_code = bm.total_return_code(price_code)
+        price = aks.index_returns(price_code, "2024-01-01", "2024-12-31", **kw)
+        total = aks.index_returns(total_code, "2024-01-01", "2024-12-31", **kw)
+        assert float(price.iloc[-1]) == pytest.approx(price_ret, abs=0.002), price_code
+        assert float(total.iloc[-1]) == pytest.approx(total_ret, abs=0.002), total_code
+    r = aks.index_returns("932000", NET_START, NET_END, source="csindex", **net_kw)
+    assert len(r) > 40
+
+
+@pytest.mark.network
+def test_network_timing_gamma_sensitive_to_2024_09(tmp_path):
+    """110020 对 H00300，2021-01 至 2025-12 月度，HAC 滞后 3、t 分布：TM γ 由 2024-09 一期主导。
+
+    本地实测（2026-09-27）：全样本 γ = −0.141（t = −6.22）；剔除 2024-09（基金 +19.28%，指数 +21.11%）
+    后 γ = −0.042（t = −2.02）。默认的稳健 z 值阈值 5 不一定把 2024-09 标为异常，因此这里显式剔除该月；
+    γ 仍为负且 |t| 未跨过 1.96，按规则不算“显著性改变”，但幅度缩小约七成。
+    """
+    pytest.importorskip("akshare")
+    from fundeval.alpha.robustness import exclusion_sensitivity
+
+    kw = {"cache_dir": tmp_path}
+    start, end = "2021-01-01", "2025-12-31"
+    fund = aks.fund_returns("110020", start, end, freq="M", **kw)
+    bench = aks.index_returns("H00300", start, end, freq="M", **kw)
+    rf = aks.risk_free_returns(start, end, "M", source="auto", index=fund.index, **kw)
+    idx = fund.index.intersection(bench.index)
+    fund, bench, rf = fund[idx], bench[idx], rf.reindex(idx)
+    sep = idx[idx.to_period("M") == pd.Period("2024-09", "M")]
+    assert len(sep) == 1
+    assert float(fund[sep[0]]) == pytest.approx(0.1928, abs=0.002)
+    assert float(bench[sep[0]]) == pytest.approx(0.2111, abs=0.002)
+    rob = exclusion_sensitivity(fund, bench, rf, sep, hac_lags=3, use_t=True)
+    full, trimmed = rob.full["TM"], rob.trimmed["TM"]
+    assert full.gamma == pytest.approx(-0.141, abs=0.01) and full.gamma_t == pytest.approx(-6.22, abs=0.3)
+    assert trimmed.gamma == pytest.approx(-0.042, abs=0.01) and trimmed.gamma_t == pytest.approx(-2.02, abs=0.3)

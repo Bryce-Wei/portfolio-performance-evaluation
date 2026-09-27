@@ -37,7 +37,9 @@ akshare 是可选依赖，按需延迟导入；未安装时报错并提示 ``pip
 
 两层超时都按网络类异常重试或切换数据源。指数行情默认 ``source="auto"``：纯数字代码先走
 东方财富，网络失败后改用中证指数官网；无风险利率 ``source="auto"`` 按 RF_AUTO_ORDER
-（Shibor 3M → 国债 2 年）依次尝试，全部失败时报错，不静默改用常数。所有自动切换与缓存
+（Shibor 3M → 国债 2 年）依次尝试，也可给逗号分隔的顺序列表（如 "cgb2y,shibor3m"），全部失败时
+报错，不静默改用常数。自动切换中非最后一个候选只尝试 1 次就切换，最后一个候选才按 MAX_ATTEMPTS
+重试，避免在不稳定的数据源上白等（本地实测 Shibor 3 次读取超时约 100 秒）。所有自动切换与缓存
 回退都发出 RuntimeWarning，并写入 collect_notes() 收集的附注，供报告使用。
 """
 
@@ -56,6 +58,7 @@ import numpy as np
 import pandas as pd
 
 from fundeval.etl import schema
+from fundeval.etl.benchmark import index_record
 from fundeval.etl.quality import CROSS_CHECK_TOLERANCE, nav_growth_check
 from fundeval.etl.returns import period_code, period_end_index, price_to_returns, to_frequency
 
@@ -308,17 +311,22 @@ def _with_retry(
     timeout: float | None = DEFAULT_TIMEOUT,
     total_timeout: float | None = DEFAULT_TOTAL_TIMEOUT,
     name: str = "上游接口",
+    attempts: int | None = None,
 ) -> pd.DataFrame:
-    """网络类异常（含超时）按指数退避共尝试 MAX_ATTEMPTS 次，最后一次仍失败时抛出；其他异常立即抛出。
+    """网络类异常（含超时）按指数退避共尝试 ``attempts`` 次（默认 MAX_ATTEMPTS），最后一次仍失败时抛出；
+    其他异常立即抛出。自动切换数据源时，非最后一个候选只尝试 1 次（见 index_prices、risk_free_returns）。
 
     每次尝试中单个 HTTP 请求限 ``timeout`` 秒，整次尝试限 ``total_timeout`` 秒（见 _call_with_timeout），
     每次重试重新计时；requests.Timeout 与 UpstreamTimeout 都视为网络类异常。
     """
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    attempts = MAX_ATTEMPTS if attempts is None else int(attempts)
+    if attempts < 1:
+        raise ValueError(f"attempts 须为正整数，收到 {attempts}")
+    for attempt in range(1, attempts + 1):
         try:
             return _call_with_timeout(fetch, timeout, name, total_timeout)
         except Exception as exc:
-            if not is_network_error(exc) or attempt == MAX_ATTEMPTS:
+            if not is_network_error(exc) or attempt == attempts:
                 raise
             _sleep(RETRY_BACKOFF * 2 ** (attempt - 1))
     raise AssertionError("unreachable")  # pragma: no cover
@@ -461,6 +469,7 @@ def _cached_call(
     cache_max_age=CACHE_MAX_AGE,
     timeout: float | None = DEFAULT_TIMEOUT,
     total_timeout: float | None = DEFAULT_TOTAL_TIMEOUT,
+    attempts: int | None = None,
     date_col: str | None = None,
     coverage_end=None,
     dated: bool = True,
@@ -483,7 +492,9 @@ def _cached_call(
         if reason is None:
             return cached
     try:
-        df = _with_retry(fetch, timeout=timeout, total_timeout=total_timeout, name=f"{interface}（{code}）")
+        df = _with_retry(
+            fetch, timeout=timeout, total_timeout=total_timeout, name=f"{interface}（{code}）", attempts=attempts
+        )
     except Exception as exc:
         if cached is None or not is_network_error(exc):
             raise
@@ -718,11 +729,16 @@ _LOOKBACK_DAYS = 40
 
 
 def index_source(code: str) -> str:
-    """按代码推断默认数据源：``cbond:`` 前缀为中债，含字母（如 H11001、H00300）为中证指数官网，其余为东方财富。"""
+    """按代码推断默认数据源：``cbond:`` 前缀为中债，含字母（如 H11001、H00300）为中证指数官网；
+    纯数字代码按指数表（etl.benchmark.INDEX_RECORDS）登记的数据源（如中证2000 932000 只在中证官网
+    核实过），表外纯数字代码为东方财富。"""
     if code.startswith("cbond:"):
         return "cbond"
     if not code.isdigit():
         return "csindex"
+    rec = index_record(code)
+    if rec is not None and code == rec.price_code:
+        return rec.source
     return "em"
 
 
@@ -765,7 +781,7 @@ def index_prices(
     """指数日收盘点位（中债为财富指数值），含 start 之前约 40 个自然日，供计算首日收益。
 
     ``source="auto"``（默认，None 同义）：``cbond:`` 代码走中债，H 开头等中证代码直接走中证
-    指数官网；纯数字代码先试东方财富，网络类异常（重试后仍失败）时自动改用中证指数官网，
+    指数官网；纯数字代码先试东方财富（只尝试 1 次），网络类异常时自动改用中证指数官网（按 MAX_ATTEMPTS 重试），
     发出 RuntimeWarning 并写入 collect_notes() 的附注。实际使用的数据源记录在结果的
     ``attrs["source"]``（em / csindex / cbond）与 ``attrs["source_label"]``。
     """
@@ -776,7 +792,8 @@ def index_prices(
         used = index_source(code)
         if used == "em":
             try:
-                price = _index_prices_from("em", code, fetch_start, end, cache)
+                # 自动切换时东方财富不是最后一个候选：只尝试 1 次就改用中证官网，不白等重试
+                price = _index_prices_from("em", code, fetch_start, end, {**cache, "attempts": 1})
             except Exception as exc:
                 if not is_network_error(exc):
                     raise
@@ -849,8 +866,11 @@ def rate_series(
     cache_max_age=CACHE_MAX_AGE,
     timeout: float | None = DEFAULT_TIMEOUT,
     total_timeout: float | None = DEFAULT_TOTAL_TIMEOUT,
+    _attempts: int | None = None,
 ) -> pd.Series:
-    """年化利率序列（小数），来源见 RATE_SOURCES，如 "shibor3m"、"cgb10y"。"""
+    """年化利率序列（小数），来源见 RATE_SOURCES，如 "shibor3m"、"cgb10y"。
+
+    ``_attempts`` 供自动切换内部使用：非最后一个候选只尝试 1 次。"""
     if source not in RATE_SOURCES:
         raise ValueError(
             f"未知的无风险利率来源 {source!r}，可选：{sorted(RATE_SOURCES)} 或 'auto'，或直接传入常数年化利率"
@@ -862,6 +882,7 @@ def rate_series(
     if dated:
         kwargs[spec["start_arg"]] = "19901219" if fetch_start is None else fetch_start.strftime("%Y%m%d")
     cache = _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout, total_timeout)
+    cache["attempts"] = _attempts
     # 不接受日期参数的接口总是返回全历史，缓存不按日期区间分键
     raw = _call(
         spec, source, fetch_start if dated else None, end if dated else None, cache,
@@ -870,6 +891,31 @@ def rate_series(
     _require_columns(raw, [spec["date"], spec["rate"]], spec["func"])
     rate = _series(raw, spec["date"], spec["rate"], source).dropna() / 100
     return rate.loc[: pd.Timestamp(end) if end is not None else None]
+
+
+def parse_rate_sources(source) -> tuple[str, ...]:
+    """把无风险利率来源解析为按顺序尝试的名称元组：``"auto"`` → RF_AUTO_ORDER；
+    ``"cgb2y,shibor3m"`` 或 ("cgb2y", "shibor3m") → 按给出顺序；单个名称 → 只含它自己。
+    名称须在 RATE_SOURCES 中，重复或为空时报错。"""
+    if isinstance(source, str):
+        if source.strip() == "auto":
+            return RF_AUTO_ORDER
+        parts = [x.strip() for x in source.replace("，", ",").split(",")]
+    else:
+        parts = [str(x).strip() for x in source]
+    if not parts or any(not x for x in parts):
+        raise ValueError(f"无风险利率来源列表不能有空项：{source!r}")
+    if "auto" in parts and len(parts) > 1:
+        raise ValueError("auto 不能与其他来源并列；auto 等价于 " + ",".join(RF_AUTO_ORDER))
+    unknown = [x for x in parts if x not in RATE_SOURCES]
+    if unknown:
+        raise ValueError(
+            f"未知的无风险利率来源 {unknown}，可选：{sorted(RATE_SOURCES)}、'auto' 或逗号分隔的顺序列表，"
+            "或直接传入常数年化利率"
+        )
+    if len(set(parts)) != len(parts):
+        raise ValueError(f"无风险利率来源重复：{source!r}")
+    return tuple(parts)
 
 
 def _per_period(y, k: int):
@@ -896,10 +942,12 @@ def risk_free_returns(
     - y 为年化利率（小数），K 为一年期数（D=252、W=52、M=12、Q=4、A=1）
     - 每期使用期初已知的利率：周、月、季、年频取上一期最后一个报价，日频取前一个报价日
       的利率；更早没有报价的期为 NaN，不填补
-    - ``source`` 为 RATE_SOURCES 中的名称（如 "shibor3m"）、"auto"，或常数年化利率（如 0.018）
-    - ``source="auto"`` 按 RF_AUTO_ORDER（shibor3m → cgb2y）依次尝试，网络类异常时改用下一个，
-      发出 RuntimeWarning 并写入附注；全部失败时抛出 DataSourceUnavailable，提示改用常数，
-      不静默改用常数
+    - ``source`` 为 RATE_SOURCES 中的名称（如 "shibor3m"）、"auto"、逗号分隔的顺序列表
+      （如 "cgb2y,shibor3m"，也可传元组），或常数年化利率（如 0.018）
+    - ``source="auto"`` 等价于 "shibor3m,cgb2y"（RF_AUTO_ORDER）。列表按顺序尝试，网络类异常时改用
+      下一个；非最后一个候选只尝试 1 次，最后一个候选按 MAX_ATTEMPTS 重试。切换时发出 RuntimeWarning
+      并写入附注；全部失败时抛出 DataSourceUnavailable，提示改用常数，不静默改用常数。
+      单个名称不做切换，按 MAX_ATTEMPTS 重试
     - Shibor 等货币市场利率本身是单利报价，这里按复利换算只是近似，报告中须写明口径
 
     ``index`` 给出时，结果按其日期所属的期对齐（例如月末交易日映射到同月）；
@@ -922,20 +970,22 @@ def risk_free_returns(
         out.attrs.update(source=float(source), failed=[], description=describe_rate_source(float(source), freq))
         return out
 
-    candidates = RF_AUTO_ORDER if source == "auto" else (source,)
+    candidates = parse_rate_sources(source)
+    switching = len(candidates) > 1
     failed: list[str] = []
     errors: list[str] = []
     rate = None
     used = None
-    for name in candidates:
+    for i, name in enumerate(candidates):
+        last = i == len(candidates) - 1
         try:
             rate = rate_series(
                 name, start, end, cache_dir=cache_dir, use_cache=use_cache, refresh=refresh,
                 cache_lag_days=cache_lag_days, cache_max_age=cache_max_age, timeout=timeout,
-                total_timeout=total_timeout,
+                total_timeout=total_timeout, _attempts=None if last else 1,
             )
         except Exception as exc:
-            if source != "auto" or not is_network_error(exc):
+            if not switching or not is_network_error(exc):
                 raise
             failed.append(name)
             errors.append(f"{RATE_SOURCES[name]['label']} 获取失败（{_describe_error(exc)}）")

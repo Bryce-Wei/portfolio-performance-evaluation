@@ -26,7 +26,7 @@
 
 ## 代码：fundeval 工具包
 
-`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验、Brinson 归因、择时模型、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。
+`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、择时模型、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。
 
 | 模块 | 对应章节 | 状态 |
 | --- | --- | --- |
@@ -36,14 +36,15 @@
 | `etl/sources` French 因子数据源 | 一 数据准备 | 待实现 |
 | `returns.py`（TWR、年化、MWR/XIRR、超额收益） | 二 收益衡量 | 已实现 |
 | `risk.py`（波动、回撤、Sharpe、IR、Treynor、M²） | 三 风险调整 | 已实现 |
-| `alpha/`（regression：因子与 CAPM 回归、HAC 标准误、可选 t 分布推断；rolling：滚动 Alpha/Beta、滚动 IR、样本内外切分；fundamental：IR ≈ TC × IC × √BR） | 四 Alpha 来源 | 已实现 |
+| `alpha/`（regression：因子与 CAPM 回归、HAC 标准误、可选 t 分布推断；rolling：滚动 Alpha/Beta、滚动 IR、样本内外切分；robustness：剔除异常期后重估 CAPM 与择时回归；fundamental：IR ≈ TC × IC × √BR） | 四 Alpha 来源 | 已实现 |
+| `attribution/style.py`（Sharpe 收益型风格分析：非负、和为 1 的约束回归，R²、残差均值与波动、共线性诊断、滚动风格权重）；`etl/benchmark.py` 的 `style_preset` 风格指数预设 | 五 第 1 节 | 已实现 |
 | `attribution/brinson.py`（单期 BHB / BF、多期 Cariño 链接与对账） | 五 第 2 节 | 已实现 |
 | `attribution/timing.py`（Treynor–Mazuy、Henriksson–Merton） | 五 第 5 节 | 已实现 |
-| `attribution/` 风格分析（style）、多因子分解（factor）、Campisi | 五 第 1、3、4 节 | 待实现 |
+| `attribution/` 多因子分解（factor）、Campisi | 五 第 3、4 节 | 待实现 |
 | `costs.py` | 六 交易成本 | 待实现 |
 | `monitor.py`（滚动实现 TE（K 须显式给出）、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
 | `tail.py`（下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES） | 八 尾部风险 | 已实现 |
-| `report/`（evaluate 按六个评价维度汇总、conclusion 三段结论、to_markdown、to_excel）与 `cli.py` | 九、十 | 已实现 |
+| `report/`（evaluate 按六个评价维度汇总，含收益来源的风格分析与剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel）与 `cli.py` | 九、十 | 已实现 |
 
 ### 安装
 
@@ -53,7 +54,7 @@ pip install -e ".[test]" && pytest  # 测试不访问网络
 pytest -m network                   # 本地运行联网冒烟测试（需安装 data）
 ```
 
-联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债），一个数据源不可达不影响其他项；中债网站 yield.chinabond.com.cn 在部分网络环境下无法建立连接，遇到连接类异常时跳过并注明原因，数据格式或列名错误仍然算失败。
+联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债、风格指数），一个数据源不可达不影响其他项。东方财富指数、Shibor 与中债三项遇到连接类或超时类异常（ConnectionError、requests.Timeout、UpstreamTimeout）时跳过并注明原因，列名、格式或数值错误仍然算失败（规则见 `tests/data/akshare/README.md`）。
 
 依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
 
@@ -72,6 +73,13 @@ fundeval report --fund 110011 --benchmark "沪深300指数收益率*80%+中债�
 fundeval report --fund 110020 --benchmark 000300 --index-source csindex --rf 0.018 \
     --start 2021-01-01 --end 2025-12-31 --hac-lags 3 --use-t --out report.md
 
+# 风格分析：沪深300成长 / 价值、中证500、中证1000（全收益）与现金，附 36 个月滚动权重
+fundeval report --fund 110020 --benchmark 000300 --style cn_equity --style-window 36 \
+    --start 2021-01-01 --end 2025-12-31 --hac-lags 3 --use-t --out report.md
+
+# 无风险利率按给定顺序尝试：先国债 2 年，失败再用 Shibor 3M
+fundeval report --fund 110011 --benchmark 000300 --rf cgb2y,shibor3m --out report.md
+
 # 本地 CSV / Excel，不依赖网络
 fundeval report --input tests/data/worked_example.csv \
     --columns "月份=date,组合收益=portfolio,基准收益=benchmark,无风险收益=risk_free" --out report.md
@@ -83,7 +91,8 @@ fundeval report --input tests/data/worked_example.csv \
 | `--benchmark` | 无 | `"000300:0.8,H11001:0.2"`（代码:权重）、单个代码或合同基准文字 |
 | `--index-return-type` | `total` | `total` 把基准成分换成全收益指数（000300 → H00300 等，见下节），没有全收益版本的成分沿用原代码并警告；`price` 使用价格指数，报告写明高估限定 |
 | `--index-source` | `auto` | `auto`：H 开头等中证代码走中证指数官网，纯数字代码先试东方财富、网络失败后改用中证官网；也可指定 `em` 或 `csindex` |
-| `--rf` | `auto` | `auto`：`--fund` 时按 Shibor 3M → 国债 2 年期依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y` 或常数年化利率（如 `0.018`） |
+| `--rf` | `auto` | `auto`：`--fund` 时等价于 `shibor3m,cgb2y`，依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取单个来源 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y`，逗号分隔的顺序列表（如 `cgb2y,shibor3m`），或常数年化利率（如 `0.018`） |
+| `--style` / `--style-window` | 无 | 风格分析：预设名 `cn_equity`（沪深300成长 H00918、沪深300价值 H00919、中证500 H00905、中证1000 H00852、现金）、`cn_balanced`（再加中证全债 H11001，收益类型未知，报告注明），或逗号分隔的代码列表（`cash` 表示无风险收益）。指数按 `--index-return-type` 默认换成全收益代码，数据源与收益类型写入口径；`--style-window` 另附滚动权重，窗口不小于风格资产数 + 2 |
 | `--freq` / `--input-freq` | `M` / 同 `--freq` | 评价频率；`--input-freq D --freq M` 先把日度收益按期内复利合成为月度 |
 | `--hac-lags` / `--use-t` | 无 / 关 | Newey–West 标准误的滞后阶数；`--use-t` 让 HAC 的 p 值与置信区间也用 t 分布。月度样本不足 120 期且使用 HAC 时建议加 `--use-t`，否则正态近似会高估显著性 |
 | `--mar` | 无风险收益 | Sortino 的最低可接受收益（每期，小数） |
@@ -96,7 +105,7 @@ fundeval report --input tests/data/worked_example.csv \
 
 无风险利率均按复利口径 (1 + y)^(1/K) − 1 换算为每期，并取期初已知的报价。组合与基准的对齐由 `evaluate` 完成，报告口径写明“组合 N 期、基准 M 期、共同 K 期”，被丢弃的期列入附注。
 
-数据源与缓存：超时分两层。`--timeout`（默认 30 秒，Python 中为各取数函数的 `timeout` 参数）限制每个 HTTP 请求的连接与读取，足以防止连接挂起；一次接口调用可能翻很多页，例如 Shibor 3M（`rate_interbank`）约 10 页、本地实测 44–119 秒，每页各自计时，不会因累计耗时而超时。`--total-timeout`（默认 300 秒，参数 `total_timeout`）限制一次接口调用的总时长，只作兜底，防止上游不经 requests 或反复慢而不断；它由后台线程实现，线程无法强行终止，超时后该线程可能仍在运行，其结果会被丢弃。两个参数设为 `None` 表示不启用对应一层。网络类异常（requests 异常、连接断开、超时）自动重试，共 3 次，指数退避；指数与无风险利率的自动切换都会发出警告，实际来源写入报告口径与附注。缓存命中时检查覆盖范围：数据最后日期早于截止日（或今天）之前最后一个工作日 7 天以上即重新拉取；不接受日期参数的接口（基金净值、Shibor、中债）与未给截止日的请求，缓存文件超过 1 天也会重新拉取（Python 中可用 `cache_lag_days`、`cache_max_age` 调整）。重新拉取失败时回退到旧缓存，但一定发出警告，并在报告附注中注明“使用 YYYY-MM-DD 的缓存数据”。网络失败导致无法出报告时，命令输出一行中文错误与替代办法，返回码 2。
+数据源与缓存：超时分两层。`--timeout`（默认 30 秒，Python 中为各取数函数的 `timeout` 参数）限制每个 HTTP 请求的连接与读取，足以防止连接挂起；一次接口调用可能翻很多页，例如 Shibor 3M（`rate_interbank`）约 10 页、本地实测 44–119 秒，每页各自计时，不会因累计耗时而超时。`--total-timeout`（默认 300 秒，参数 `total_timeout`）限制一次接口调用的总时长，只作兜底，防止上游不经 requests 或反复慢而不断；它由后台线程实现，线程无法强行终止，超时后该线程可能仍在运行，其结果会被丢弃。两个参数设为 `None` 表示不启用对应一层。网络类异常（requests 异常、连接断开、超时）自动重试，共 3 次，指数退避；自动切换数据源时（指数东方财富 → 中证官网，无风险利率按顺序列表），非最后一个候选只尝试 1 次就切换，最后一个候选才重试 3 次，避免在不稳定的数据源上白等（本地实测 110011 全流程 196 秒中约 100 秒花在 Shibor 的 3 次读取超时上）；指数与无风险利率的自动切换都会发出警告，实际来源写入报告口径与附注。缓存命中时检查覆盖范围：数据最后日期早于截止日（或今天）之前最后一个工作日 7 天以上即重新拉取；不接受日期参数的接口（基金净值、Shibor、中债）与未给截止日的请求，缓存文件超过 1 天也会重新拉取（Python 中可用 `cache_lag_days`、`cache_max_age` 调整）。重新拉取失败时回退到旧缓存，但一定发出警告，并在报告附注中注明“使用 YYYY-MM-DD 的缓存数据”。网络失败导致无法出报告时，命令输出一行中文错误与替代办法，返回码 2。
 
 ### 价格指数与全收益指数
 
@@ -109,9 +118,19 @@ fundeval report --input tests/data/worked_example.csv \
 
 以价格指数为基准时，结论会写成“存在正截距的统计证据”；换成全收益指数后，Alpha 不再显著。这一差异全部来自成分股分红。因此 CLI 默认 `--index-return-type total`，把 000300、000905、000906、000852、000016 换成 H00300、H00905、H00906、H00852、H00016（经中证指数官网 `stock_zh_index_hist_csindex` 取数）。中债“财富”指数本身是全收益口径；H11001 等中证债券指数的口径在指数表中标为未知。基准含价格指数或未知类型成分时，报告在口径、附注与结论中都会写明“价格指数不含成分股分红，超额收益与 Alpha 会高估约为股息率的幅度”。在 Python 中可用 `fundeval.etl.benchmark.total_return_code("000300")` 查询全收益代码，用 `labels={"benchmark_return_type": ...}` 把收益类型传给 `evaluate`。
 
+### 风格分析与稳健性检验
+
+Sharpe 收益型风格分析（正文第五部分第 1 节）用约束回归 r_p,t = Σ w_k r_k,t + ε_t（w_k ≥ 0，Σ w_k = 1）估计组合收益变化最接近哪些风格。默认最小化残差方差（`objective="variance"`，与正文“以解释收益波动为目标”一致），也可用 `"sse"` 最小化残差平方和；用 scipy SLSQP 求解，未收敛时报错。结果给出权重、R² = 1 − Var(ε)/Var(r_p)、残差均值（每期与算术年化）与残差年化波动；风格指数两两相关系数高于 0.95 时发出警告并写入诊断。风格权重是统计估计，不等于实际持仓；残差均值不能直接视为扣除一切风险后的选股能力。
+
+指数表另收录沪深300成长 000918 → H00918、沪深300价值 000919 → H00919、中证红利 000922 → H00922（2026-09-27 在中证官网实测，2024 年全收益与价格指数的差异与分红相符），以及中证2000 932000（全收益代码未知，不填；H20932 不是中证2000全收益，不得使用）。中证红利与沪深300价值相关性高，不放进默认预设。
+
+`evaluate` 默认做一次剔除异常期的敏感性分析（正文第四部分第 3 节“稳健性”）：剔除数据质量报告标为异常收益的期（组合、基准或市场任一被标记即剔除），重新估计 CAPM、Treynor–Mazuy 与 Henriksson–Merton 回归，报告两组系数与 t 值。关键系数（CAPM Alpha、TM γ、HM γ）变号或 |t| 跨过 1.96 时，结论写明“结论对 N 个异常期敏感”并列出剔除前后的 t 值；没有异常期时写“无异常期，未做剔除”。本地实测 110020 对 H00300（2021-01 至 2025-12 月度，HAC 滞后 3，t 分布）：TM γ 全样本 −0.141（t = −6.22），剔除 2024-09（基金 +19.28%，指数 +21.11%）后为 −0.042（t = −2.02）。该月未超过默认的异常阈值，可用 `fundeval.alpha.exclusion_sensitivity` 显式指定要剔除的期。
+
 ### Python 示例
 
 ```python
+import pandas as pd
+
 from fundeval import risk, tail
 from fundeval.etl.sources import files
 from fundeval.report import evaluate, to_markdown, to_excel
@@ -135,6 +154,14 @@ to_markdown(report, "report.md"); to_excel(report, "report.xlsx")
 from fundeval.alpha import capm_regression
 res = capm_regression(df.portfolio, df.benchmark, df.risk_free, hac_lags=2, use_t=True)  # 小样本 HAC 用 t 分布
 res.table(); res.annualized_alpha(12)  # 算术年化 α × K
+
+from fundeval.attribution import rolling_style, style_analysis
+styles = pd.DataFrame({"成长": growth, "价值": value})  # growth、value 为风格指数单期收益 Series，与组合同频、同期
+res = style_analysis(df.portfolio, styles, risk_free=df.risk_free)  # risk_free 给出时加入 cash 列
+res.weights; res.r_squared; res.annualized_residual_mean(12)  # 残差均值 × K，算术口径
+rolling_style(df.portfolio, styles, window=36).weights       # 按窗口末期排列
+report = evaluate(df, periods_per_year=12, style_returns=styles.assign(cash=df.risk_free), style_window=36)
+report.robustness.summary()  # 剔除异常期的敏感性分析
 
 from fundeval.etl.sources import akshare as aks  # 需 pip install "fundeval[data]"
 from fundeval.etl.benchmark import benchmark_return_type, total_return_code

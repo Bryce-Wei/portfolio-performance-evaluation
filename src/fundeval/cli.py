@@ -12,8 +12,12 @@ CSV / Excel（走 etl.sources.files），不依赖网络。
 
 基准成分默认换成全收益指数（``--index-return-type total``，如 000300 → H00300），因为基金净值
 含分红而价格指数不含；指数默认 ``--index-source auto``（东方财富失败时改用中证指数官网），
-无风险利率默认 ``--rf auto``（Shibor 3M 失败时改用国债 2 年）。自动切换与旧缓存回退写入
-报告附注；网络失败时输出一行中文提示与替代办法，返回码 2。
+无风险利率默认 ``--rf auto``（Shibor 3M 失败时改用国债 2 年，也可写顺序列表如 ``cgb2y,shibor3m``）。
+自动切换时非最后一个候选只尝试 1 次。自动切换与旧缓存回退写入报告附注；网络失败时输出一行
+中文提示与替代办法，返回码 2。
+
+``--style cn_equity``（或逗号分隔的代码列表，``cash`` 表示无风险收益）在报告“收益来源”一节做
+Sharpe 风格分析，``--style-window 36`` 另附滚动权重；风格指数默认用全收益代码。
 """
 
 from __future__ import annotations
@@ -29,11 +33,15 @@ import pandas as pd
 
 from fundeval.etl import schema
 from fundeval.etl.benchmark import (
+    CASH,
+    RETURN_TYPE_LABELS,
+    STYLE_PRESETS,
     benchmark_return_type,
     composite_benchmark,
     index_return_type,
     lookup_index_code,
     parse_benchmark,
+    style_preset,
     total_return_code,
 )
 from fundeval.etl.quality import CROSS_CHECK_TOLERANCE
@@ -145,6 +153,55 @@ def _benchmark_from_akshare(spec, start, end, freq, cache, *, return_type="total
     return bench, labels, notes
 
 
+def parse_style_spec(spec: str) -> dict[str, str]:
+    """解析 --style：预设名（如 ``cn_equity``，见 etl.benchmark.style_preset）或逗号分隔的代码列表
+    （``cash`` 表示无风险收益）。返回 {列名: 代码}；代码列表的列名即代码本身。"""
+    spec = spec.strip()
+    if spec in STYLE_PRESETS:
+        return style_preset(spec)
+    codes = [c.strip() for c in spec.replace("，", ",").split(",")]
+    if not codes or any(not c for c in codes):
+        raise ValueError(f"无法解析 --style {spec!r}：应为预设名（{'、'.join(STYLE_PRESETS)}）或逗号分隔的代码列表")
+    if len(set(codes)) != len(codes):
+        raise ValueError(f"--style 代码重复：{spec!r}")
+    if len(codes) < 2:
+        raise ValueError("--style 至少需要两个风格资产（可含 cash）")
+    return {c: c for c in codes}
+
+
+def _style_from_akshare(spec, start, end, freq, cache, risk_free, index, *, return_type="total", source="auto"):
+    """联网取风格指数收益，返回 (风格收益表, labels 补充, 附注)。cash 列取无风险收益。"""
+    from fundeval.etl.sources import akshare as aks
+
+    columns = parse_style_spec(spec)
+    notes: list[str] = []
+    frames, described, sources = {}, [], []
+    for col, code in columns.items():
+        if code == CASH:
+            rf = risk_free if isinstance(risk_free, pd.Series) else pd.Series(float(risk_free), index=index)
+            frames[col] = rf.reindex(index)
+            described.append(f"{col}：无风险收益（与报告无风险收益同口径）")
+            continue
+        used = code
+        if return_type == "total":
+            used = total_return_code(code) or code
+            if used == code and index_return_type(code) != "total":
+                msg = f"风格指数 {code} 没有对应的全收益指数，沿用原代码"
+                warnings.warn(msg, RuntimeWarning, stacklevel=2)
+                notes.append(msg)
+        r = aks.index_returns(used, start, end, source=source, freq=None if freq == "D" else freq, **cache)
+        r = _trim_partial(r, freq, start, end)
+        frames[col] = r
+        kind = RETURN_TYPE_LABELS.get(index_return_type(used), "未知")
+        described.append(f"{col}：{used}（{kind}）")
+        sources.append(f"{used}：{r.attrs.get('source_label', '未知')}")
+        if index_return_type(used) != "total":
+            notes.append(f"风格指数 {col}（{used}）收益类型为{kind}，与含分红的基金净值口径可能不一致，权重与残差须谨慎解读")
+    style = pd.concat(frames, axis=1)
+    labels = {"style": "；".join(described), "style_source": "；".join(sources) or "—"}
+    return style, labels, notes
+
+
 def _build_report_inputs(args):
     freq = args.freq.upper()
     k = schema.periods_per_year(freq)
@@ -222,6 +279,16 @@ def _build_report_inputs(args):
             if risk_free.isna().any():
                 raise ValueError(f"无风险利率 {rf_arg} 未覆盖全部观测期，请检查区间或改用常数 --rf")
 
+    style_returns = None
+    if args.style_window is not None and not args.style:
+        raise ValueError("--style-window 须与 --style 一起给出")
+    if args.style:
+        style_returns, style_labels, style_notes = _style_from_akshare(
+            args.style, args.start, args.end, freq, cache, risk_free, portfolio.index, **bench_kw
+        )
+        labels.update(style_labels)
+        notes += style_notes
+
     targets = None
     if args.target_te is not None:
         if args.target_active is None or args.window is None:
@@ -240,6 +307,8 @@ def _build_report_inputs(args):
         cross_check=cross_check,
         use_t=True if args.use_t else None,
         notes=notes,
+        style_returns=style_returns,
+        style_window=args.style_window,
     )
 
 
@@ -290,9 +359,16 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--freq", default="M", help="评价频率 D/W/M/Q（默认 M）")
     rp.add_argument(
         "--rf", default="auto",
-        help="无风险收益：auto（默认；--fund 时按 shibor3m → cgb2y 依次尝试，本地文件按 0 计）、"
-        "shibor3m、shibor1m、shibor_on、cgb2y、cgb10y，或常数年化利率如 0.018",
+        help="无风险收益：auto（默认；--fund 时等价于 shibor3m,cgb2y，本地文件按 0 计）、"
+        "shibor3m、shibor1m、shibor_on、cgb2y、cgb10y，逗号分隔的顺序列表如 cgb2y,shibor3m"
+        "（依次尝试，非最后一个只试 1 次），或常数年化利率如 0.018",
     )
+    rp.add_argument(
+        "--style",
+        help="风格分析：预设名（" + "、".join(STYLE_PRESETS) + "）或逗号分隔的指数代码，cash 表示无风险收益；"
+        "指数按 --index-return-type 默认换成全收益代码",
+    )
+    rp.add_argument("--style-window", type=int, help="滚动风格分析的窗口期数（不小于风格资产数 + 2）")
     rp.add_argument("--mar", type=float, help="Sortino 的最低可接受收益（每期，小数）；缺省取无风险收益")
     rp.add_argument("--hac-lags", type=int, help="回归使用 Newey–West 标准误的滞后阶数")
     rp.add_argument("--use-t", action="store_true", help="HAC 回归的 p 值与置信区间也用 t 分布（小样本建议）")

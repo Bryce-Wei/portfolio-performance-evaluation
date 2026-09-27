@@ -59,7 +59,10 @@ class IndexRecord:
 
 
 #: 指数表。全收益代码（H00300 等）已在中证官网 stock_zh_index_hist_csindex 实测可取（2026-09-27）；
-#: 中债“财富”指数为全收益口径。中证债券指数（H11001、H11009）在本表中未核实其价格 / 财富口径，
+#: 其中沪深300成长 H00918、沪深300价值 H00919、中证红利 H00922 另核对了 2024 年全收益与价格指数的
+#: 差异与分红相符（成长 6.91% 对 4.24%，价值 30.84% 对 24.85%，红利 18.76% 对 12.31%）。
+#: 中证2000（932000）的全收益代码未知，不填；H20932 不是中证2000全收益（2024 年 +52.37%，
+#: 价格指数为 −2.14%），不得使用。中债“财富”指数为全收益口径。中证债券指数（H11001、H11009）在本表中未核实其价格 / 财富口径，
 #: 标为 unknown；上证综指、深证成指、创业板指的全收益版本未经核实，不填，不做猜测。
 INDEX_RECORDS: tuple[IndexRecord, ...] = (
     IndexRecord("沪深300", "000300", "H00300", "em", PRICE),
@@ -67,6 +70,10 @@ INDEX_RECORDS: tuple[IndexRecord, ...] = (
     IndexRecord("中证800", "000906", "H00906", "em", PRICE),
     IndexRecord("中证1000", "000852", "H00852", "em", PRICE),
     IndexRecord("上证50", "000016", "H00016", "em", PRICE),
+    IndexRecord("沪深300成长", "000918", "H00918", "em", PRICE),
+    IndexRecord("沪深300价值", "000919", "H00919", "em", PRICE),
+    IndexRecord("中证红利", "000922", "H00922", "em", PRICE),
+    IndexRecord("中证2000", "932000", None, "csindex", PRICE),
     IndexRecord("上证综合", "000001", None, "em", PRICE, ("上证综指",)),
     IndexRecord("深证成份", "399001", None, "em", PRICE, ("深证成指",)),
     IndexRecord("创业板", "399006", None, "em", PRICE, ("创业板指",)),
@@ -133,6 +140,34 @@ def benchmark_return_type(codes: Sequence[str]) -> str:
 def needs_price_caveat(label: str | None) -> bool:
     """基准收益类型为价格指数、含价格指数成分或未知时，报告须写明价格指数的限定语。"""
     return label in (RETURN_TYPE_LABELS[PRICE], RETURN_TYPE_LABELS["mixed"], RETURN_TYPE_LABELS[UNKNOWN])
+
+
+#: 风格分析中代表无风险收益（现金）的列名与代码
+CASH = "cash"
+
+#: 风格指数预设（正文第五部分第 1 节）：{列名: 指数代码}，指数一律取全收益代码，``cash`` 为无风险收益。
+#: 风格基准宜覆盖完整且尽量低冗余；中证红利与沪深300价值相关性高，不放进默认预设，只在指数表中提供。
+STYLE_PRESETS: dict[str, dict[str, str]] = {
+    "cn_equity": {
+        "沪深300成长": "H00918",
+        "沪深300价值": "H00919",
+        "中证500": "H00905",
+        "中证1000": "H00852",
+        "现金": CASH,
+    },
+}
+STYLE_PRESETS["cn_balanced"] = {**STYLE_PRESETS["cn_equity"], "中证全债": "H11001"}
+
+
+def style_preset(name: str) -> dict[str, str]:
+    """风格指数预设，返回 {列名: 指数代码} 的副本；``cash`` 表示以无风险收益作现金资产。
+
+    - ``cn_equity``：沪深300成长 H00918、沪深300价值 H00919、中证500 H00905、中证1000 H00852、现金
+    - ``cn_balanced``：cn_equity 加中证全债 H11001（收益类型未经核实，报告中注明）
+    """
+    if name not in STYLE_PRESETS:
+        raise KeyError(f"未知的风格预设 {name!r}，可选：{sorted(STYLE_PRESETS)}")
+    return dict(STYLE_PRESETS[name])
 
 
 _TERM_PATTERNS = (
