@@ -3,13 +3,16 @@
 基金合同中的业绩比较基准常写作“沪深300指数收益率×80%+中债综合指数收益率×20%”。
 ``parse_benchmark`` 只解析能确定无歧义的写法，``composite_benchmark`` 按权重合成收益。
 合同基准通常隐含每日（每期）再平衡；成分指数是否含分红（价格指数或全收益指数）
-直接影响基准收益，须在报告口径中写明。
+直接影响基准收益，须在报告口径中写明。基金净值含分红，与价格指数比较会把成分股
+股息计入超额收益，因此 ``INDEX_RECORDS`` 记录每个指数的全收益版本，``total_return_code``
+给出替换代码，``benchmark_return_type`` 给出报告口径中的“基准收益类型”。
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -19,26 +22,118 @@ from fundeval.etl import schema
 #: 权重加总的容差
 WEIGHT_TOL = 1e-8
 
-#: 常见指数名称到代码的对照，供 lookup_index_code 使用。
+#: 收益类型：price 价格指数（不含成分股分红）；total 全收益 / 财富指数（分红或利息再投资）；
+#: unknown 无法确认。
+PRICE, TOTAL, UNKNOWN = "price", "total", "unknown"
+
+#: 基准收益类型的中文标签，供报告口径使用
+RETURN_TYPE_LABELS = {TOTAL: "全收益", PRICE: "价格指数", "mixed": "含价格指数成分", UNKNOWN: "未知"}
+
+#: 价格指数不含分红时的限定语，写入报告口径、附注与结论
+PRICE_INDEX_CAVEAT = "价格指数不含成分股分红，超额收益与 Alpha 会高估约为股息率的幅度"
+
+
+@dataclass(frozen=True)
+class IndexRecord:
+    """一条指数记录。
+
+    - ``name``：常用名称；``aliases`` 为其他写法
+    - ``price_code``：价格指数代码（中债财富指数等没有价格指数版本的为 None）
+    - ``total_code``：对应的全收益指数代码，没有或未经核实的为 None
+    - ``source``：主代码（price_code，缺省时为 total_code）的默认数据源：
+      ``em`` 东方财富、``csindex`` 中证指数官网、``cbond`` 中债；全收益代码一律取自中证官网
+    - ``return_type``：主代码的收益类型（price / total / unknown）
+    """
+
+    name: str
+    price_code: str | None
+    total_code: str | None
+    source: str
+    return_type: str
+    aliases: tuple[str, ...] = ()
+
+    @property
+    def code(self) -> str:
+        """主代码：price_code，缺省时为 total_code。"""
+        return self.price_code or self.total_code
+
+
+#: 指数表。全收益代码（H00300 等）已在中证官网 stock_zh_index_hist_csindex 实测可取（2026-09-27）；
+#: 中债“财富”指数为全收益口径。中证债券指数（H11001、H11009）在本表中未核实其价格 / 财富口径，
+#: 标为 unknown；上证综指、深证成指、创业板指的全收益版本未经核实，不填，不做猜测。
+INDEX_RECORDS: tuple[IndexRecord, ...] = (
+    IndexRecord("沪深300", "000300", "H00300", "em", PRICE),
+    IndexRecord("中证500", "000905", "H00905", "em", PRICE),
+    IndexRecord("中证800", "000906", "H00906", "em", PRICE),
+    IndexRecord("中证1000", "000852", "H00852", "em", PRICE),
+    IndexRecord("上证50", "000016", "H00016", "em", PRICE),
+    IndexRecord("上证综合", "000001", None, "em", PRICE, ("上证综指",)),
+    IndexRecord("深证成份", "399001", None, "em", PRICE, ("深证成指",)),
+    IndexRecord("创业板", "399006", None, "em", PRICE, ("创业板指",)),
+    IndexRecord("中证全债", "H11001", None, "csindex", UNKNOWN),
+    IndexRecord("中证综合债", "H11009", None, "csindex", UNKNOWN),
+    IndexRecord("中债综合", None, "cbond:composite", "cbond", TOTAL),
+    IndexRecord("中债新综合", None, "cbond:new_composite", "cbond", TOTAL),
+)
+
+#: 名称到主代码的对照，供 lookup_index_code 使用。
 #: 代码前缀 ``cbond:`` 表示中债指数（中国债券信息网），取财富（全收益）指数。
 #: 名称只按下表精确匹配，表外名称报错，由调用方手动指定代码。
 INDEX_CODES: dict[str, str] = {
-    "沪深300": "000300",
-    "中证500": "000905",
-    "中证800": "000906",
-    "中证1000": "000852",
-    "上证50": "000016",
-    "上证综合": "000001",
-    "上证综指": "000001",
-    "深证成份": "399001",
-    "深证成指": "399001",
-    "创业板": "399006",
-    "创业板指": "399006",
-    "中证全债": "H11001",
-    "中证综合债": "H11009",
-    "中债综合": "cbond:composite",
-    "中债新综合": "cbond:new_composite",
+    name: rec.code for rec in INDEX_RECORDS for name in (rec.name, *rec.aliases)
 }
+
+
+def index_record(code: str) -> IndexRecord | None:
+    """按价格指数或全收益指数代码查指数记录；表外代码返回 None。"""
+    for rec in INDEX_RECORDS:
+        if code in (rec.price_code, rec.total_code):
+            return rec
+    return None
+
+
+def index_return_type(code: str) -> str:
+    """指数代码的收益类型：price、total 或 unknown（表外代码为 unknown）。"""
+    rec = index_record(code)
+    if rec is None:
+        return UNKNOWN
+    if code == rec.total_code:
+        return TOTAL
+    return rec.return_type
+
+
+def total_return_code(code: str) -> str | None:
+    """有对应全收益指数时返回其代码（本身已是全收益指数时返回自身），否则返回 None。"""
+    rec = index_record(code)
+    if rec is None:
+        return None
+    if code == rec.total_code or (code == rec.price_code and rec.return_type == TOTAL):
+        return code
+    return rec.total_code
+
+
+def benchmark_return_type(codes: Sequence[str]) -> str:
+    """复合基准的收益类型标签：全收益、价格指数、含价格指数成分或未知。
+
+    全部成分为全收益时为“全收益”；全部为价格指数时为“价格指数”；部分成分为价格指数时为
+    “含价格指数成分”；其余情形（有未知成分、没有价格指数成分）为“未知”。
+    """
+    types = [index_return_type(c) for c in codes]
+    if not types:
+        return RETURN_TYPE_LABELS[UNKNOWN]
+    if all(t == TOTAL for t in types):
+        return RETURN_TYPE_LABELS[TOTAL]
+    if all(t == PRICE for t in types):
+        return RETURN_TYPE_LABELS[PRICE]
+    if PRICE in types:
+        return RETURN_TYPE_LABELS["mixed"]
+    return RETURN_TYPE_LABELS[UNKNOWN]
+
+
+def needs_price_caveat(label: str | None) -> bool:
+    """基准收益类型为价格指数、含价格指数成分或未知时，报告须写明价格指数的限定语。"""
+    return label in (RETURN_TYPE_LABELS[PRICE], RETURN_TYPE_LABELS["mixed"], RETURN_TYPE_LABELS[UNKNOWN])
+
 
 _TERM_PATTERNS = (
     # 名称 × 权重%：沪深300指数收益率*80%

@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 data = ["akshare>=1.18.97"]
 excel = ["openpyxl>=3.1"]
-test = ["pytest>=7"]
+test = ["pytest>=7", "requests>=2.28"]  # requests 用于模拟 akshare 上游的网络异常
 
 [project.scripts]
 fundeval = "fundeval.cli:main"

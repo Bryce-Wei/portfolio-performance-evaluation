@@ -82,3 +82,13 @@ def test_report_from_akshare_with_fake_interfaces(monkeypatch, tmp_path):
     # 数据源日增长率与净值推算不一致的日期进入数据质量报告
     assert "2024-02-20" in text and "基点" in text
     assert "样本较短" in text and "具备管理能力" not in text
+
+
+def test_cli_use_t_flag(tmp_path):
+    out = tmp_path / "r.md"
+    args = ["report", "--input", str(DATA / "worked_example.csv"), "--columns", COLUMNS, "--hac-lags", "2", "--out", str(out)]
+    assert cli.main(args) == 0
+    assert "HAC（Newey–West，滞后 2，正态近似）" in out.read_text(encoding="utf-8")
+    assert cli.main([*args, "--use-t"]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "HAC（Newey–West，滞后 2，t 分布）" in text and "正态近似" not in text

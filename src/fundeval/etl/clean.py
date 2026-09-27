@@ -30,7 +30,7 @@ def align(*series: pd.Series, how: str = "inner", names: list[str] | None = None
         if len(names) != len(series):
             raise ValueError("names 与序列数量不一致")
         series = tuple(s.rename(n) for s, n in zip(series, names))
-    return pd.concat(series, axis=1, join=how).sort_index()
+    return pd.concat(series, axis=1, join=how, sort=True).sort_index()
 
 
 def align_returns(
