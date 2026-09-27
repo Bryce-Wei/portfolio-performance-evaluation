@@ -46,6 +46,9 @@ CJK_FONTS = (
 #: 滚动超额收益与跟踪误差的默认窗口（期）
 ROLLING_WINDOW = 12
 
+#: 回撤未修复时，0 线上方留出的空白带（最大回撤的倍数），用于放“未修复”标注
+UNRECOVERED_HEADROOM = 0.15
+
 #: 系列颜色：按固定顺序分配，不循环（超过时合并或截断并提示）
 SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
 INK = "#0b0b0b"
@@ -240,9 +243,13 @@ def drawdown_figure(data: pd.DataFrame, lang: str = "zh"):
                     markeredgecolor=SURFACE, markeredgewidth=2, zorder=3)
             ax.annotate(text, (date, y), textcoords="offset points",
                         xytext=(4, -12 if label == t["trough"] else 6), fontsize=8, color=INK)
+        # 谷底标注写在点下方：底部多留一段，避免压到横轴
+        ax.set_ylim(bottom=float(dd.min()) * (1 + UNRECOVERED_HEADROOM))
         if not isinstance(details["recovery"], pd.Timestamp):
-            ax.annotate(t["unrecovered"], (dd.index[-1], float(dd.iloc[-1])), textcoords="offset points",
-                        xytext=(-40, 6), fontsize=8, color=INK_SECONDARY)
+            # 回撤曲线恒 ≤ 0：在 0 线上方留出空白带，“未修复”写在右上角，不压在曲线上
+            ax.set_ylim(top=UNRECOVERED_HEADROOM * max(float(-dd.min()), 1e-6))
+            ax.text(0.99, 0.98, t["unrecovered"], transform=ax.transAxes, ha="right", va="top",
+                    fontsize=8, color=INK_SECONDARY)
     _percent_axis(ax)
     _title(ax, t["drawdown_title"])
     fig.tight_layout()
@@ -341,7 +348,8 @@ def _font_context(font: str | None):
 
 def report_charts(report, out_dir, *, window: int = ROLLING_WINDOW) -> ChartSet:
     """为 EvaluationReport 生成 PNG 图表到 ``out_dir``：wealth、drawdown，有基准且期数不少于 window 时 rolling，
-    有滚动风格分析时 style。未生成的图表及原因记入 ``skipped``。"""
+    有滚动风格分析（style_window）时 style。未生成的图表及原因记入 ``skipped``（写入 Markdown 与 Excel 的图注），
+    例如只做全样本风格分析时注明需要 --style-window。"""
     require_matplotlib()
     lang, font = chart_language()
     out = Path(out_dir)
@@ -362,6 +370,8 @@ def report_charts(report, out_dir, *, window: int = ROLLING_WINDOW) -> ChartSet:
             paths["style"] = _save(
                 style_figure(report.style_rolling.weights, report.style_rolling.window, lang, codes), out / "style.png"
             )
+        elif report.style is not None:
+            skipped["style"] = "只做了全样本风格分析，没有滚动权重（CLI 加 --style-window，Python 用 style_window）"
     return ChartSet(paths=paths, lang=lang, font=font, skipped=skipped)
 
 

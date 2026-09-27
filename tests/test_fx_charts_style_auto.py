@@ -459,3 +459,28 @@ def test_network_fx_rates_hkd(tmp_path):
         s = aks.fx_rates("港元", "2021-01-01", "2025-12-31", cache_dir=tmp_path)
     assert s.loc["2021-01-04"] == pytest.approx(0.84363, abs=1e-4)
     assert s.loc["2025-12-31"] == pytest.approx(0.90322, abs=1e-4)
+
+
+def test_unrecovered_label_sits_above_the_curve(mpl):
+    """回撤未修复时，“未修复”写在 0 线上方的空白带里（右上角），不压在曲线上。"""
+    from fundeval.report import charts
+
+    idx = pd.date_range("2021-01-31", periods=24, freq="ME")
+    data = pd.DataFrame({"portfolio": [0.02] * 6 + [-0.05] * 6 + [0.001] * 12}, index=idx)
+    fig = charts.drawdown_figure(data, "zh")
+    ax = fig.axes[0]
+    label = next(t for t in ax.texts if t.get_text() == "未修复")
+    assert label.get_transform() == ax.transAxes and label.get_position() == (0.99, 0.98)
+    bottom, top = ax.get_ylim()
+    x0, y0 = ax.transData.inverted().transform(ax.transAxes.transform((0.99, 0.98)))
+    assert top > 0 and y0 > 0  # 标注所在高度高于 0，而回撤曲线恒 ≤ 0
+
+
+def test_style_chart_skip_reason_without_window(mpl, tmp_path):
+    """只做全样本风格分析（未给 style_window）时不画风格权重图，并写明需要 --style-window。"""
+    from fundeval.report.charts import report_charts
+
+    rep = _monthly_report()
+    rep.style_rolling = None
+    res = quiet(report_charts, rep, tmp_path)
+    assert list(res.paths) == ["wealth", "drawdown", "rolling"] and "--style-window" in res.skipped["style"]
