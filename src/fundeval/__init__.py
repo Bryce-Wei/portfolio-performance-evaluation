@@ -13,8 +13,8 @@
 - ``fundeval.costs``：第六部分，换手率、线性交易成本、近似净 Alpha、容量检查与规模敏感性
 - ``fundeval.monitor``：第七部分，实现 TE、风险倍数、z 值与 Green/Yellow/Red 分区
 - ``fundeval.tail``：第八部分，下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES
-- ``fundeval.report``：第九、十部分，一键评价报告、三段结论与 Markdown / Excel 导出
-- ``fundeval.cli``：命令行 ``fundeval report``
+- ``fundeval.report``：第九、十部分，一键评价报告、三段结论、Markdown / Excel 导出与多基金横向对比
+- ``fundeval.cli``：命令行 ``fundeval report`` 与 ``fundeval compare``
 
 约定：所有收益率以小数输入输出（0.02 表示 2%）；K 为一年期数，月度取 12。
 """

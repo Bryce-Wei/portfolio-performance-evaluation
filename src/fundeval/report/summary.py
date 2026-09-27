@@ -94,6 +94,8 @@ class EvaluationReport:
     - ``factor``：多因子分解（未提供因子收益时为 None）
     - ``costs``：成本与净 Alpha 的计算结果（未给出 costs 时为 None）；``capacity`` 为容量检查表
     - ``robustness``：剔除异常期的敏感性分析（未做回归或关闭时为 None）
+    - ``profile``：基金概况（etl.sources.akshare.FundProfile，未提供时为 None）；``benchmark_components``：
+      合同基准的解析结果表（etl.benchmark.resolution_table，未用合同基准时为 None）
     - ``style`` / ``style_rolling``：全样本与滚动风格分析（未提供风格指数时为 None）
     - ``monitoring``：持续监控结果（未给出 monitor_targets 时为 None）
     - ``quality``：数据质量报告
@@ -120,6 +122,18 @@ class EvaluationReport:
     factor: FactorDecomposition | None = None
     costs: dict[str, Any] | None = None
     capacity: pd.DataFrame | None = None
+    profile: Any = None
+    benchmark_components: pd.DataFrame | None = None
+
+    @property
+    def is_index_fund(self) -> bool:
+        """基金概况显示为指数型基金（结论优先报告跟踪误差与跟踪偏离）。"""
+        return bool(self.profile is not None and self.profile.is_index_fund)
+
+    @property
+    def is_qdii(self) -> bool:
+        """基金概况显示为 QDII 基金（结论提示汇率与境外市场的影响）。"""
+        return bool(self.profile is not None and self.profile.is_qdii)
 
     @property
     def price_index_caveat(self) -> bool:
@@ -362,6 +376,49 @@ def _cost_block(spec: Mapping[str, Any], alpha_annual: float, alpha_name: str, f
     }
 
 
+#: QDII 基金的提示（正文第一部分“基准选择”）
+QDII_NOTE = (
+    "QDII 基金投资境外市场，净值受人民币汇率与境外市场（交易时段、节假日、估值时点）影响，"
+    "与境内基准逐期比较时可能错期；合同基准含非人民币成分时本报告未做汇率换算"
+)
+
+
+def _fee_value(value) -> str:
+    if value is None:
+        return "未披露"
+    if isinstance(value, str):
+        return f"{value}（原文）"
+    return f"{value:.2%}/年"
+
+
+def _fee_text(profile, fee_label: str) -> str:
+    """费率说明：管理费、托管费、销售服务费；费用后净值口径下注明已含于净值，不再扣减。"""
+    text = "，".join(f"{name} {_fee_value(v)}" for name, v in profile.fees().items())
+    if _fees_deducted(fee_label):
+        return f"{text}（已含于费用后净值，不再扣减）"
+    return f"{text}（费用前口径，计算净 Alpha 时须扣减）"
+
+
+def _profile_scope(profile) -> dict[str, str]:
+    out = {}
+    if profile.full_name:
+        out["基金全称"] = profile.full_name
+    if profile.fund_type:
+        out["基金类型"] = profile.fund_type
+    if profile.tracking_target:
+        out["跟踪标的"] = profile.tracking_target
+    return out
+
+
+def _components_text(table: pd.DataFrame) -> str:
+    """解析结果表的一行文字：成分 权重 → 代码（收益类型，币种，数据源）。"""
+    items = []
+    for _, r in table.iterrows():
+        weight = "" if pd.isna(r["权重"]) else f" {float(r['权重']):.0%}"
+        items.append(f"{r['成分']}{weight} → {r['代码']}（{r['收益类型']}，{r['币种']}，{r['数据源']}）")
+    return "；".join(items)
+
+
 def _fmt_date(value) -> str:
     return value if isinstance(value, str) else f"{pd.Timestamp(value):%Y-%m-%d}"
 
@@ -387,6 +444,8 @@ def evaluate(
     robustness: bool = True,
     factor_returns: pd.DataFrame | None = None,
     costs: Mapping[str, Any] | None = None,
+    profile: Any = None,
+    benchmark_components: pd.DataFrame | None = None,
 ) -> EvaluationReport:
     """生成评价报告（正文第九、十部分）。
 
@@ -425,6 +484,12 @@ def evaluate(
         （费用前 Alpha；缺省时取报告的多因子或 CAPM 算术年化 Alpha）与 capacity（{"trade_amount",
         "adv", "max_participation", "days"}，传给 costs.capacity_check）。给出时增加“成本与容量”一节，
         结论写出近似净 Alpha；费用口径为费用后净值时不重复扣减（公募基金净值通常已扣除管理费与交易成本）
+    profile : 基金概况（etl.sources.akshare.fund_profile 的结果）；给出时口径写明基金全称、基金类型、
+        合同业绩比较基准原文与费率（管理费、托管费、销售服务费；费用后净值口径下注明“已含于费用后净值，
+        不再扣减”）。指数型基金在“风险效率”一节增加年化跟踪偏离，结论优先报告跟踪误差与跟踪偏离；
+        QDII 基金在结论与附注中提示汇率与境外市场的影响
+    benchmark_components : 合同基准的解析结果表（etl.benchmark.resolution_table），口径中列出，
+        Markdown 与 Excel 另附“基准解析”表
 
     组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。口径中写明
     “组合 N 期、基准 M 期、共同 K 期”，有期数被丢弃时在附注中列出其起止日期；
@@ -486,6 +551,9 @@ def evaluate(
     if b is not None:
         add(s, "tracking_error", "跟踪误差 TE", risk.tracking_error(p, b, k), PCT, "年化：主动收益样本标准差 × √K")
         add(s, "information_ratio", "信息比率 IR", risk.information_ratio(p, b, k), RATIO, "年化：主动收益算术均值 / TE")
+        if profile is not None and profile.is_index_fund:
+            add(s, "tracking_difference", "年化跟踪偏离", ret.annualized_return(p, k) - ret.annualized_return(b, k), PP,
+                "基金几何年化收益 − 基准几何年化收益（指数型基金）")
     if m is not None:
         note = "K × 超额收益均值 / β" + ("；以基准代替市场" if market_proxy else "")
         add(s, "treynor", "Treynor 比率", risk.treynor_ratio(p, m, rf, k), PCT, note)
@@ -704,8 +772,16 @@ def evaluate(
         "样本对齐": alignment_text,
         "频率 K": f"{freq_name}，K = {k}",
         "组合": labels.get("portfolio", "组合"),
-        "基准": labels.get("benchmark", "基准" if b is not None else "未提供"),
     }
+    if profile is not None:
+        scope.update(_profile_scope(profile))
+    scope["基准"] = labels.get("benchmark", "基准" if b is not None else "未提供")
+    if profile is not None and profile.benchmark_text:
+        scope["合同业绩比较基准"] = profile.benchmark_text
+    if benchmark_components is not None and len(benchmark_components):
+        scope["基准解析"] = _components_text(benchmark_components)
+    if "benchmark_currency" in labels:
+        scope["基准币种"] = labels["benchmark_currency"]
     benchmark_type = labels.get("benchmark_return_type") if b is not None else None
     if b is not None:
         type_text = benchmark_type or "未说明"
@@ -730,6 +806,10 @@ def evaluate(
         if "factor_source" in labels:
             scope["因子数据源"] = labels["factor_source"]
     scope["费用口径"] = fee_label
+    if profile is not None:
+        scope["费率"] = _fee_text(profile, fee_label)
+    if profile is not None and profile.is_qdii:
+        notes.append(QDII_NOTE + "。")
     scope["比率口径"] = "同频算术均值与样本标准差（n−1），乘以 √K 年化；累计与年化收益为几何口径"
     if market_proxy:
         notes.append("未提供市场收益，Treynor、CAPM 与择时回归以基准代替市场。")
@@ -791,6 +871,8 @@ def evaluate(
         factor=factor,
         costs=cost_result,
         capacity=capacity,
+        profile=profile,
+        benchmark_components=benchmark_components,
     )
 
 
@@ -866,6 +948,13 @@ def conclusion(report: EvaluationReport) -> str:
         )
     else:
         obs[-1] += "。"
+    if r.is_index_fund and has("tracking_error"):
+        target = f"（跟踪标的：{r.profile.tracking_target}）" if r.profile.tracking_target else ""
+        obs.insert(1, (
+            f"该基金为指数型基金{target}，首先看跟踪质量：跟踪误差 {_pct(r.metric('tracking_error'))}（年化），"
+            f"年化跟踪偏离 {format_value(r.metric('tracking_difference'), PP)}（基金几何年化收益 − 基准几何年化收益），"
+            f"累计跟踪偏离 {format_value(r.metric('cumulative_difference'), PP)}。"
+        ))
     risk_text = (
         f"年化波动率 {_pct(r.metric('volatility'))}，最大回撤 {_pct(r.metric('max_drawdown'))}"
     )
@@ -970,8 +1059,13 @@ def conclusion(report: EvaluationReport) -> str:
             f"Calmar 比率 {format_value(r.metric('calmar'), RATIO)}（几何年化收益 / 最大回撤）。"
         )
 
+    if r.is_index_fund and r.capm is not None:
+        sup.append("对指数型基金，Alpha 与择时检验的意义次于跟踪质量；跟踪偏离主要来自费用、现金拖累与复制误差。")
+
     # 三、需要进一步验证的判断
     ver: list[str] = []
+    if r.is_qdii:
+        ver.append(QDII_NOTE + "，超额收益中可能含汇率与错期的影响。")
     todo = [row["检验"] for _, row in r.not_done.iterrows()]
     if todo:
         ver.append("以下检验未做：" + "；".join(todo) + "。收益是否来自风格暴露、因子溢价或费用前后差异，需补做后再下结论。")

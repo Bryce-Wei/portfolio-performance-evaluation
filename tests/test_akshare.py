@@ -499,3 +499,56 @@ def test_network_factor_test_skips_when_fund_fetch_times_out(monkeypatch, tmp_pa
     with pytest.raises(pytest.skip.Exception, match="基金 110011 净值.*无法连接或超时.*ReadTimeout"):
         test_network_factor_decomposition_cn_index_proxy(tmp_path, "110011")
     assert len(calls) == aks.MAX_ATTEMPTS
+
+
+_PROFILE_EXPECTED = {  # 2026-09-27 用 akshare 1.18.97 本地实测
+    "110011": ("QDII-混合偏股", "沪深300指数收益率*50%+中证香港300指数收益率*30%+中债总指数收益率*20%"),
+    "110020": ("指数型-股票", "沪深300指数收益率*95%+活期存款利率(税后)*5%"),
+    "000001": ("混合型-灵活", "中证800成长指数收益率*70%+中债-综合全价(总值)指数收益率*30%"),
+}
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("code", list(_PROFILE_EXPECTED))
+def test_network_fund_profile(net_kw, code):
+    """基金概况（东方财富 fund_overview_em）：基金类型与合同业绩比较基准原文与本地实测一致。"""
+    with skip_if_unreachable(f"基金 {code} 概况（东方财富 fund_overview_em）"):
+        p = aks.fund_profile(code, **net_kw)
+    fund_type, text = _PROFILE_EXPECTED[code]
+    assert p.fund_type == fund_type and p.benchmark_text == text
+    assert p.full_name and p.inception_date is not None and isinstance(p.management_fee, float)
+
+
+@pytest.mark.network
+def test_network_index_catalog(net_kw):
+    """中证指数目录（index_csindex_all）：约 2370 行，含 800成长 H30355 与以港元计价的香港300 H11164。"""
+    with skip_if_unreachable("中证指数官网 index_csindex_all"):
+        cat = aks.index_catalog(**net_kw)
+    assert len(cat) > 2000
+    rows = cat.set_index("指数代码")
+    assert rows.loc["H30355", "指数全称"] == "中证800成长指数" and rows.loc["H11164", "指数币种"] == "港元"
+    assert "H00300" not in rows.index  # 全收益指数不在目录中
+    comps = bm.resolve_benchmark(_PROFILE_EXPECTED["000001"][1], cat)
+    assert [c.code for c in comps] == ["H30355", "cbond:composite_full"]
+
+
+@pytest.mark.network
+def test_network_contract_report_110020(tmp_path):
+    """110020 只给基金代码：取合同基准（沪深300 95% + 活期存款 5%）解析为 H00300 与现金，跑通报告。
+
+    取数在重试后仍遇到连接类或超时类异常时 skip；解析、格式或数值错误仍判失败。
+    """
+    pytest.importorskip("akshare")
+    from fundeval.report import evaluate, to_markdown
+    from fundeval.report.inputs import ReportOptions, build_report_inputs
+
+    opts = ReportOptions(fund="110020", start="2021-01-01", end="2025-12-31", freq="M", cache_dir=tmp_path)
+    with skip_if_unreachable("基金 110020 概况、净值、H00300 或无风险利率"):
+        inputs = build_report_inputs(opts)
+    table = inputs["benchmark_components"]
+    assert list(table["代码"]) == ["H00300", "cash:demand"] and list(table["权重"]) == [0.95, 0.05]
+    rep = evaluate(**inputs)
+    assert rep.n >= 55 and rep.benchmark_return_type == "全收益" and rep.is_index_fund
+    assert 0 < rep.metric("tracking_error") < 0.05
+    text = to_markdown(rep)
+    assert "合同业绩比较基准" in text and "## 基准解析" in text and "年化跟踪偏离" in text

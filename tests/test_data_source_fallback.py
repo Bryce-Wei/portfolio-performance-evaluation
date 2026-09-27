@@ -82,8 +82,14 @@ def test_resolve_benchmark_codes_warns_when_no_total_index():
     assert cli.resolve_benchmark_codes(parts, "price") == (parts, [])
 
 
+#: 110011 的合同基准含名称有歧义的“中债总指数”，未给 --benchmark 时须指定映射
+MAP_110011 = ("--benchmark-map", "中债总指数=cbond:composite")
+
+
 def _fund_report(monkeypatch, tmp_path, *extra, fake=None):
     fake = use(monkeypatch, fake or FakeAkshare())
+    if "--benchmark" not in extra:
+        extra = (*extra, *MAP_110011)
     out = tmp_path / "fund.md"
     args = [
         "report", "--fund", "110011", "--start", START, "--end", END, "--freq", "W",
@@ -247,7 +253,7 @@ def test_cli_risk_free_failure_is_a_network_error(monkeypatch, tmp_path, capsys,
     use(monkeypatch, FakeAkshare(fail={"rate_interbank": SHIBOR_DOWN, "bond_zh_us_rate": EM_DOWN}))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        code = cli.main(["report", "--fund", "110011", "--start", START, "--end", END, "--cache-dir", str(tmp_path / "c")])
+        code = cli.main(["report", "--fund", "110011", "--start", START, "--end", END, "--cache-dir", str(tmp_path / "c"), *MAP_110011])
     err = capsys.readouterr().err
     assert code == 2 and "Traceback" not in err and "网络请求失败" in err and "--rf 0.018" in err
 

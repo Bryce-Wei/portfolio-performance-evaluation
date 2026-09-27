@@ -26,13 +26,13 @@
 
 ## 代码：fundeval 工具包
 
-`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、多因子分解（含 A 股指数代理因子）、Campisi 固收归因、择时模型、交易成本与策略容量、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。
+`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、多因子分解（含 A 股指数代理因子）、Campisi 固收归因、择时模型、交易成本与策略容量、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。只输入基金代码即可评价：自动取基金概况与合同业绩比较基准并解析成复合基准；也可多基金横向对比。
 
 | 模块 | 对应章节 | 状态 |
 | --- | --- | --- |
 | `etl/`（schema、sources/files、clean、returns：单期收益与 to_frequency 频率转换） | 一 数据准备 | 已实现 |
-| `etl/sources/akshare.py`（基金单位净值加分红的总收益、指数行情、Shibor / 国债利率换算、网络重试与数据源自动切换、带覆盖检查的本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
-| `etl/benchmark.py`（指数表与全收益代码、基准收益类型、复合基准合成、合同基准文字解析）、`etl/quality.py`（数据质量报告、净值与日增长率交叉核对） | 一 数据准备 | 已实现 |
+| `etl/sources/akshare.py`（基金单位净值加分红的总收益、基金概况 `fund_profile`（类型、费率、合同基准原文，缓存 1 天）、中证指数目录 `index_catalog`（缓存 7 天）、指数行情、Shibor / 国债利率换算、网络重试与数据源自动切换、带覆盖检查的本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
+| `etl/benchmark.py`（指数表与全收益代码、基准收益类型、复合基准合成、合同基准文字解析，`resolve_benchmark` 把合同基准逐项解析为代码、收益类型、币种与数据源）、`etl/quality.py`（数据质量报告、净值与日增长率交叉核对） | 一 数据准备 | 已实现 |
 | `etl/sources` French 因子数据源 | 一 数据准备 | 待实现 |
 | `returns.py`（TWR、年化、MWR/XIRR、超额收益） | 二 收益衡量 | 已实现 |
 | `risk.py`（波动、回撤、Sharpe、IR、Treynor、M²） | 三 风险调整 | 已实现 |
@@ -45,7 +45,7 @@
 | `costs.py`（换手率、线性交易成本、近似净 Alpha、逐资产容量检查、规模变化的成本敏感性与平方根冲击模型） | 六 交易成本 | 已实现（冲击参数须用成交记录校准） |
 | `monitor.py`（滚动实现 TE（K 须显式给出）、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
 | `tail.py`（下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES） | 八 尾部风险 | 已实现 |
-| `report/`（evaluate 按六个评价维度汇总，含多因子分解、收益来源的风格分析、成本与容量、剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel）与 `cli.py` | 九、十 | 已实现 |
+| `report/`（evaluate 按六个评价维度汇总，含多因子分解、收益来源的风格分析、成本与容量、剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel；`compare` 多基金横向对比）与 `cli.py`（`fundeval report`、`fundeval compare`） | 九、十 | 已实现 |
 
 ### 安装
 
@@ -60,6 +60,36 @@ pytest -m network                   # 本地运行联网冒烟测试（需安装
 依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
 
 ### 命令行
+
+#### 只输入基金代码
+
+```bash
+# 只给基金代码：自动取基金概况与合同业绩比较基准，解析后合成复合基准（全收益优先）
+fundeval report --fund 110020 --start 2021-01-01 --end 2025-12-31 --out report.md
+
+# 合同基准中有无法自动解析的成分时报错并列出，用 --benchmark-map 指定代码
+fundeval report --fund 110011 --benchmark-map "中债总指数=cbond:composite" \
+    --start 2021-01-01 --end 2025-12-31 --out report.md
+
+# 多基金横向对比：同一区间、同一无风险收益，各自按合同基准逐只评价；单只失败时记录原因并继续
+fundeval compare --funds 110011,110020,000001 --start 2021-01-01 --end 2025-12-31 \
+    --benchmark-map "中债总指数=cbond:composite" --factors cn_index_proxy --style cn_equity \
+    --sort sharpe --out compare.xlsx
+```
+
+给出 `--fund` 而未给 `--benchmark` 时，基准默认为 `contract`：从 `fund_overview_em` 取合同业绩比较基准原文（如 110020 的“沪深300指数收益率\*95%+活期存款利率(税后)\*5%”），`parse_benchmark` 拆出成分与权重，再按以下顺序逐项解析，先命中者为准：
+
+1. `--benchmark-map` 给出的 `名称=代码`（逗号分隔；现金可写 `cash:年化利率`），原样采用；
+2. 现金类：“活期存款利率(税后)”“银行活期存款利率”为常数年化 0.35%，“一年期定期存款利率(税后)”为 1.50%（中国人民银行存款基准利率，2015-10-24 起未调整），可用 `--deposit-rate`、`--time-deposit-rate` 覆盖；与无风险收益一样按 (1 + y)^(1/K) − 1 换算为每期；
+3. 指数表 `INDEX_RECORDS`（沪深300 → 000300，`--index-return-type total` 时换成全收益 H00300）；
+4. 中债指数：“中债-综合财富(总值)”→ `cbond:composite`（全收益），“中债-综合全价(总值)”→ `cbond:composite_full`（`bond_composite_index_cbond(indicator="全价")`，价格指数）；“中债总指数”名称有歧义，不自动映射；
+5. 中证指数目录 `index_csindex_all`：去掉“收益率”“指数”后缀后与指数简称、全称精确比较，恰好一条才采用（如“中证800成长指数”→ H30355），收益类型记为未知，报告沿用价格指数的限定语。
+
+任何成分解析失败都报错，列出全部未解析的成分与 `--benchmark-map` 写法，不做猜测。成分以非人民币计价时（如中证香港300 H11164，港元）发出警告，口径与附注写明“未做汇率换算，基准收益含汇率差异”。报告口径另写基金全称、基金类型、合同基准原文、解析结果表（成分、权重、代码、收益类型、币种、数据源）与费率（管理费、托管费、销售服务费，费用后净值口径下注明“已含于费用后净值，不再扣减”）。指数型基金在结论中先报告跟踪误差与年化跟踪偏离；QDII 基金提示汇率与境外市场的影响。
+
+`fundeval compare` 的对比表列出基金代码、简称、类型、基准收益类型、期数、年化收益、年化波动、最大回撤、Sharpe、累计超额（对各自基准）、TE、IR、CAPM Alpha（算术年化）及 t，给出 `--factors` 时加多因子 Alpha 及 t，给出 `--style` 时加风格前两项，另有数据质量问题数、标注与失败原因。不做综合打分，默认按输入顺序；`--sort`（`annualized_return`、`volatility`、`max_drawdown`、`sharpe`、`excess`、`tracking_error`、`ir`、`alpha`、`factor_alpha`、`treynor`）只按单一指标排序，失败的基金排在最后，表下注明：不同类型的基金不宜直接比较，只比较同类基金；样本少于 36 个月的基金单独标注；β 接近 0 或为负（β ≤ 0.1）时 Treynor 不参与排序。Excel 输出中对比表一个 sheet，每只基金的关键指标（失败时为失败原因）各一个 sheet，另有“失败原因”与“口径”sheet。
+
+#### 其他写法
 
 ```bash
 # 经 akshare 取基金净值与分红、复合基准与无风险利率，生成月度报告
@@ -92,8 +122,10 @@ fundeval report --input tests/data/worked_example.csv \
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `--fund` / `--input` | 二选一 | 基金代码（经 akshare 取单位净值与分红）或本地收益表 |
-| `--benchmark` | 无 | `"000300:0.8,H11001:0.2"`（代码:权重）、单个代码或合同基准文字 |
+| `--fund` / `--input` | 二选一 | 基金代码（经 akshare 取单位净值与分红，并取基金概况写入口径）或本地收益表 |
+| `--benchmark` | `--fund` 时为 `contract` | `contract`（取基金合同业绩比较基准并解析）、`"000300:0.8,H11001:0.2"`（代码:权重）、单个代码或合同基准文字 |
+| `--benchmark-map` | 无 | 合同基准中无法自动解析的成分：`"名称=代码"`，逗号分隔，如 `"中债总指数=cbond:composite"`；现金写 `cash:0.02` |
+| `--deposit-rate` / `--time-deposit-rate` | `0.0035` / `0.015` | 合同基准中活期、一年期定期存款利率的年化数值 |
 | `--index-return-type` | `total` | `total` 把基准成分换成全收益指数（000300 → H00300 等，见下节），没有全收益版本的成分沿用原代码并警告；`price` 使用价格指数，报告写明高估限定 |
 | `--index-source` | `auto` | `auto`：H 开头等中证代码走中证指数官网，纯数字代码先试东方财富、网络失败后改用中证官网；也可指定 `em` 或 `csindex` |
 | `--rf` | `auto` | `auto`：`--fund` 时等价于 `shibor3m,cgb2y`，依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取单个来源 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y`，逗号分隔的顺序列表（如 `cgb2y,shibor3m`），或常数年化利率（如 `0.018`） |
@@ -203,7 +235,16 @@ from fundeval import costs
 costs.linear_cost_rate(1.0, 0.0020)  # 0.004
 costs.net_alpha(0.04, 0.012, 0.006)  # 0.022
 
-from fundeval.etl.sources import akshare as aks  # 需 pip install "fundeval[data]"
+from fundeval.report.compare import compare  # 需 pip install "fundeval[data]"
+res = compare(["110011", "110020", "000001"], "2021-01-01", "2025-12-31", freq="M",
+              benchmark_map={"中债总指数": "cbond:composite"}, factors="cn_index_proxy", sort="sharpe")
+res.table; res.failures; res.to_markdown("compare.md"); res.to_excel("compare.xlsx")
+
+from fundeval.etl.benchmark import resolve_benchmark, resolution_table
+from fundeval.etl.sources import akshare as aks
+profile = aks.fund_profile("000001")  # 基金类型、费率（小数）、合同基准原文
+resolution_table(resolve_benchmark(profile.benchmark_text, aks.index_catalog()))
+
 from fundeval.etl.benchmark import benchmark_return_type, total_return_code
 with aks.collect_notes() as notes:  # 收集数据源自动切换与旧缓存回退的说明
     fund, check = aks.fund_returns("110020", "2021-01-01", "2025-12-31", freq="M", return_check=True)
