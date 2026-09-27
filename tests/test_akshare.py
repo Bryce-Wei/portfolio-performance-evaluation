@@ -443,3 +443,59 @@ def test_network_timing_gamma_sensitive_to_2024_09(tmp_path):
     full, trimmed = rob.full["TM"], rob.trimmed["TM"]
     assert full.gamma == pytest.approx(-0.141, abs=0.01) and full.gamma_t == pytest.approx(-6.22, abs=0.3)
     assert trimmed.gamma == pytest.approx(-0.042, abs=0.01) and trimmed.gamma_t == pytest.approx(-2.02, abs=0.3)
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("fund_code", ["110011", "110020"])
+def test_network_factor_decomposition_cn_index_proxy(tmp_path, fund_code):
+    """110011 与 110020 对 cn_index_proxy 因子（H00300、H00852、H00919、H00918，中证指数官网全收益）的
+    多因子回归，2021-01 至 2025-12 月度，HAC 滞后 3、t 分布：能正常运行，因子暴露为有限值，R² 在 (0, 1) 内。
+    不断言具体数值。
+
+    取数（东方财富基金净值、中证官网指数、无风险利率）在重试后仍遇到连接类或超时类异常时 skip 并注明原因；
+    列名、格式或数值错误，以及回归与对账失败仍然算失败。
+    """
+    pytest.importorskip("akshare")
+    from fundeval.attribution.factor import factor_decomposition, index_proxy_factors, preset_codes
+
+    kw = {"cache_dir": tmp_path}
+    start, end = "2021-01-01", "2025-12-31"
+    with skip_if_unreachable(f"基金 {fund_code} 净值（东方财富 fund_open_fund_info_em）"):
+        fund = aks.fund_returns(fund_code, start, end, freq="M", **kw)
+    with skip_if_unreachable("中证指数官网 stock_zh_index_hist_csindex"):
+        indices = pd.concat(
+            {code: aks.index_returns(code, start, end, freq="M", source="csindex", **kw) for code in preset_codes("cn_index_proxy")},
+            axis=1,
+        ).dropna()
+    idx = fund.index.intersection(indices.index)
+    with skip_if_unreachable("无风险利率（Shibor 3M / 国债 2 年）"):
+        rf = aks.risk_free_returns(start, end, "M", source="auto", index=idx, **kw)
+    factors = index_proxy_factors(indices.loc[idx], rf)
+    d = factor_decomposition(fund[idx], factors, rf, hac_lags=3, use_t=True)
+    assert d.n >= 55
+    assert np.isfinite(d.betas).all() and np.isfinite(d.regression.tvalues).all()
+    assert 0 < d.rsquared < 1
+    rec = d.reconciliation(12)
+    assert rec["合计"] == pytest.approx(rec["平均超额收益"])
+
+
+def test_network_factor_test_skips_when_fund_fetch_times_out(monkeypatch, tmp_path):
+    """离线核对：基金净值取数在重试后仍读超时（本地实测 110011 的 fundf10.eastmoney.com 读超时）时，
+    多因子联网测试 skip 而不是失败；重试共 3 次后才抛出最后一次的异常。"""
+    import requests
+
+    calls = []
+
+    def timeout(*args, **kwargs):
+        calls.append(1)
+        raise requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)")
+
+    fake = FakeAkshare()
+    monkeypatch.setattr(fake, "fund_open_fund_info_em", timeout)
+    monkeypatch.setattr(aks, "_ak", lambda: fake)
+    monkeypatch.setattr(aks, "_sleep", lambda s: None)
+    # CI 未安装 akshare：放一个占位模块，让被测函数里的 importorskip 通过（取数走上面的 FakeAkshare）
+    monkeypatch.setitem(sys.modules, "akshare", sys.modules.get("akshare") or object())
+    with pytest.raises(pytest.skip.Exception, match="基金 110011 净值.*无法连接或超时.*ReadTimeout"):
+        test_network_factor_decomposition_cn_index_proxy(tmp_path, "110011")
+    assert len(calls) == aks.MAX_ATTEMPTS

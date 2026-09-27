@@ -49,7 +49,7 @@ def test_single_extreme_period_drives_gamma_and_is_reported():
     assert list(rob.excluded) == [IDX[44]]  # 数据质量报告标出的异常期
     tbl = rep.robustness_table().set_index("模型")
     assert tbl.loc["TM", "全样本 t"] < -1.96 and abs(tbl.loc["TM", "剔除后 t"]) < 1.96
-    assert tbl.loc["TM", "显著性或符号改变"] == "是" and tbl.loc["TM", "剔除后 n"] == N - 1
+    assert tbl.loc["TM", "结论改变"] == "是" and tbl.loc["TM", "剔除后 n"] == N - 1
     assert tbl.loc["TM", "全样本估计"] == pytest.approx(rep.timing["TM"].gamma)
     assert rob.sensitive and "TM" in rob.changed
     text = rep.conclusion()
@@ -75,10 +75,11 @@ def test_exclusion_matches_manual_refit():
         exclusion_sensitivity(p, m, RF, ["2030-01-31"])
 
 
-def test_sign_flip_counts_as_change_even_without_crossing_threshold():
+def test_changed_rule_basic_cases():
+    """判定规则的基本情形；更完整的正反例见 tests/test_robustness_rule.py。"""
     from fundeval.alpha.robustness import _changed
 
-    assert _changed(0.1, 0.5, -0.1, -0.5)
+    assert not _changed(0.1, 0.5, -0.1, -0.5)  # 两边都不显著，变号不算敏感
     assert _changed(0.1, 2.5, 0.1, 1.5)
     assert not _changed(-0.141, -6.22, -0.042, -2.02)  # 真实案例：变小但仍显著、同号
 
@@ -90,7 +91,7 @@ def test_insensitive_exclusion_is_reported_as_unchanged():
     p = RF + 0.9 * (m - RF) + 0.004 + rng.normal(0, 0.002, N)
     rep = evaluate(p, m, RF, 12)
     assert len(rep.robustness.excluded) >= 1 and not rep.robustness.sensitive
-    assert "关键系数的符号与显著性不变" in rep.conclusion()
+    assert "关键系数的符号与显著性结论不变" in rep.conclusion()
 
 
 def test_no_outliers_means_no_exclusion(worked_example):

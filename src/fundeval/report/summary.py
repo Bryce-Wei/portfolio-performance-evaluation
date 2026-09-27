@@ -1,7 +1,8 @@
 """一键评价报告：正文第九部分“从原始数据到绩效结果”与第十部分“形成可用于管理决策的结论”。
 
 ``evaluate`` 按正文六个评价维度组织结果：口径、收益表现、风险效率、下行与尾部、
-Alpha 质量、收益来源（风格分析）、持续监控，另附剔除异常期的稳健性检验、数据质量与未完成的检验。``conclusion`` 按第十部分把
+Alpha 质量（含可选的多因子分解）、收益来源（风格分析）、成本与容量、持续监控，另附剔除异常期的
+稳健性检验、数据质量与未完成的检验。``conclusion`` 按第十部分把
 “观察到的表现”“可以支持的解释”“需要进一步验证的判断”分三段写成文字。
 
 口径沿用各模块：比率使用同频算术均值与样本标准差（n−1），乘以 √K 年化；
@@ -18,10 +19,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from fundeval import costs as cost_mod
 from fundeval import monitor, risk, tail
 from fundeval import returns as ret
 from fundeval.alpha.regression import RegressionResult, capm_regression
 from fundeval.alpha.robustness import ExclusionSensitivity, exclusion_sensitivity
+from fundeval.attribution.factor import FACTOR_TYPE_ATTR, PROXY_CAVEAT, FactorDecomposition, factor_decomposition
 from fundeval.attribution.style import RollingStyleResult, StyleResult, rolling_style, style_analysis
 from fundeval.attribution.timing import TimingResult, henriksson_merton, treynor_mazuy
 from fundeval.etl import clean, schema
@@ -37,7 +40,13 @@ MIN_TAIL_OBS = 5
 #: 默认费用口径
 DEFAULT_FEE_BASIS = "费用后净值"
 
-SECTIONS = ("收益表现", "风险效率", "下行与尾部", "Alpha 质量", "收益来源", "持续监控")
+SECTIONS = ("收益表现", "风险效率", "下行与尾部", "Alpha 质量", "收益来源", "成本与容量", "持续监控")
+
+#: 公募基金净值口径的提醒（正文第六部分）
+NAV_FEE_NOTE = "公募基金净值通常已扣除管理费与交易成本，用费用后净值估计的 Alpha 已是扣费后口径，不应重复扣减"
+
+#: evaluate 的 costs 参数允许的键
+COST_KEYS = ("turnover", "unit_cost", "trade_cost", "other_fees", "gross_alpha", "capacity")
 
 #: 风格分析的限定语（正文第五部分第 1 节）
 STYLE_CAVEAT = "风格权重是统计估计，不等于实际持仓；残差均值不能直接视为扣除一切风险后的选股能力"
@@ -82,6 +91,8 @@ class EvaluationReport:
     - ``scope``：口径（有序字典，项目 → 内容）
     - ``metrics``：各维度指标表，索引为指标键，列为 section、label、value、unit、note
     - ``capm`` / ``timing``：CAPM 回归与 TM、HM 择时回归结果（样本不足时为 None）
+    - ``factor``：多因子分解（未提供因子收益时为 None）
+    - ``costs``：成本与净 Alpha 的计算结果（未给出 costs 时为 None）；``capacity`` 为容量检查表
     - ``robustness``：剔除异常期的敏感性分析（未做回归或关闭时为 None）
     - ``style`` / ``style_rolling``：全样本与滚动风格分析（未提供风格指数时为 None）
     - ``monitoring``：持续监控结果（未给出 monitor_targets 时为 None）
@@ -106,6 +117,9 @@ class EvaluationReport:
     robustness: ExclusionSensitivity | None = None
     style: StyleResult | None = None
     style_rolling: RollingStyleResult | None = None
+    factor: FactorDecomposition | None = None
+    costs: dict[str, Any] | None = None
+    capacity: pd.DataFrame | None = None
 
     @property
     def price_index_caveat(self) -> bool:
@@ -148,6 +162,8 @@ class EvaluationReport:
         """回归系数表：模型、系数、估计值、标准误、t、p、95% 置信区间、R²、n、标准误类型。"""
         rows = []
         models = [("CAPM", self.capm), ("Treynor–Mazuy", self.timing.get("TM")), ("Henriksson–Merton", self.timing.get("HM"))]
+        if self.factor is not None:
+            models.append(("多因子", self.factor.regression))
         for name, res in models:
             if res is None:
                 continue
@@ -182,6 +198,22 @@ class EvaluationReport:
         if self.style is None:
             return pd.DataFrame()
         return self.style.table()
+
+    def factor_table(self) -> pd.DataFrame:
+        """因子暴露表：因子、系数、t、p、因子均值、贡献（每期与算术年化）；未做多因子分解时为空表。"""
+        if self.factor is None:
+            return pd.DataFrame()
+        return self.factor.table(self.periods_per_year)
+
+    def factor_reconciliation(self) -> pd.DataFrame:
+        """多因子收益对账：各因子贡献、Alpha、残差、合计与平均超额收益（每期与算术年化）。"""
+        if self.factor is None:
+            return pd.DataFrame()
+        return pd.concat([self.factor.reconciliation(), self.factor.reconciliation(self.periods_per_year)], axis=1)
+
+    def capacity_table(self) -> pd.DataFrame:
+        """容量检查表（capacity_check 的结果）；未给出时为空表。"""
+        return pd.DataFrame() if self.capacity is None else self.capacity
 
     def conclusion(self) -> str:
         return conclusion(self)
@@ -281,6 +313,55 @@ def _alignment(raw_parts: Mapping[str, pd.Series], common: pd.DatetimeIndex) -> 
     return text, notes
 
 
+def _fees_deducted(fee_label: str) -> bool:
+    """费用口径是否已扣费：含“费用前”“毛收益”“扣费前”时视为未扣，其余（默认“费用后净值”）视为已扣。"""
+    return not any(word in fee_label for word in ("费用前", "毛收益", "扣费前", "gross"))
+
+
+def _cost_block(spec: Mapping[str, Any], alpha_annual: float, alpha_name: str, fee_label: str) -> dict[str, Any]:
+    """按 costs 参数计算交易成本、其他费用与近似净 Alpha（正文第六部分）。"""
+    unknown = sorted(set(spec) - set(COST_KEYS))
+    if unknown:
+        raise ValueError(f"costs 含未知的键：{'、'.join(unknown)}；可用键为 {'、'.join(COST_KEYS)}")
+    if "trade_cost" in spec:
+        trade = float(spec["trade_cost"])
+        if not np.isfinite(trade) or trade < 0:
+            raise ValueError(f"costs['trade_cost'] 须为非负数（年化，小数），收到 {spec['trade_cost']!r}")
+        to = float(spec["turnover"]) if "turnover" in spec else float("nan")
+        c = float(spec["unit_cost"]) if "unit_cost" in spec else float("nan")
+        trade_note = "调用方给出（年化）"
+    else:
+        if "turnover" not in spec or "unit_cost" not in spec:
+            raise ValueError("costs 须给出 turnover 与 unit_cost（或直接给出 trade_cost）")
+        to, c = float(spec["turnover"]), float(spec["unit_cost"])
+        trade = cost_mod.linear_cost_rate(to, c)
+        trade_note = "2 × TO × c，线性近似，未含冲击成本"
+    fees = float(spec.get("other_fees", 0.0))
+    if not np.isfinite(fees) or fees < 0:
+        raise ValueError(f"costs['other_fees'] 须为非负数（年化，小数），收到 {spec.get('other_fees')!r}")
+    deducted = _fees_deducted(fee_label)
+    if "gross_alpha" in spec:
+        gross = float(spec["gross_alpha"])
+        net = cost_mod.net_alpha(gross, trade, fees)
+        basis = "费用前 Alpha 由调用方给出，α_net ≈ α_gross − c_trade − c_fee"
+    elif not np.isfinite(alpha_annual):
+        gross = net = float("nan")
+        basis = "报告未估计 Alpha，无法计算净 Alpha"
+    elif deducted:
+        gross = alpha_annual + trade + fees
+        net = alpha_annual
+        basis = f"{alpha_name}已是{fee_label}口径，不再扣减；费用前 Alpha 由其加回成本反推"
+    else:
+        gross = alpha_annual
+        net = cost_mod.net_alpha(gross, trade, fees)
+        basis = f"{alpha_name}为{fee_label}口径，α_net ≈ α_gross − c_trade − c_fee"
+    return {
+        "turnover": to, "unit_cost": c, "trade_cost": trade, "trade_note": trade_note, "other_fees": fees,
+        "gross_alpha": gross, "net_alpha": net, "basis": basis, "deducted": deducted and "gross_alpha" not in spec,
+        "alpha_name": alpha_name, "fees_label": fee_label,
+    }
+
+
 def _fmt_date(value) -> str:
     return value if isinstance(value, str) else f"{pd.Timestamp(value):%Y-%m-%d}"
 
@@ -304,6 +385,8 @@ def evaluate(
     style_window: int | None = None,
     style_objective: str = "variance",
     robustness: bool = True,
+    factor_returns: pd.DataFrame | None = None,
+    costs: Mapping[str, Any] | None = None,
 ) -> EvaluationReport:
     """生成评价报告（正文第九、十部分）。
 
@@ -333,6 +416,15 @@ def evaluate(
     style_objective : 风格分析的目标函数，"variance"（默认）或 "sse"
     robustness : 默认 True：剔除数据质量报告标为异常收益的期（组合、基准或市场任一被标记即剔除），
         重新估计 CAPM、TM、HM 回归，报告两组系数与 t 值（alpha.robustness）
+    factor_returns : 因子收益（DataFrame，每列一个因子，同频小数）；给出时在“Alpha 质量”一节增加多因子
+        Alpha（每期、算术年化、t、p）与各因子暴露、贡献表（attribution.factor），沿用 hac_lags 与 use_t；
+        须覆盖全部共同期，否则报错。``attrs["factor_type"] == "index_proxy"``（index_proxy_factors 的输出）
+        或 labels["factor_type"] == "index_proxy" 时，口径与结论写明指数代理因子的限定语
+    costs : 成本输入（年化，小数）：turnover（换手率）、unit_cost（单位成交额成本，20 bp = 0.0020）、
+        other_fees（其他费用）、可选 trade_cost（直接给出交易成本率，替代 2 × TO × c）、gross_alpha
+        （费用前 Alpha；缺省时取报告的多因子或 CAPM 算术年化 Alpha）与 capacity（{"trade_amount",
+        "adv", "max_participation", "days"}，传给 costs.capacity_check）。给出时增加“成本与容量”一节，
+        结论写出近似净 Alpha；费用口径为费用后净值时不重复扣减（公募基金净值通常已扣除管理费与交易成本）
 
     组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。口径中写明
     “组合 N 期、基准 M 期、共同 K 期”，有期数被丢弃时在附注中列出其起止日期；
@@ -464,6 +556,41 @@ def evaluate(
         add(s, f"{key.lower()}_gamma", f"{name} 择时 γ", res.gamma, RATIO, "TM：x² 系数" if key == "TM" else "HM：max(x, 0) 系数")
         add(s, f"{key.lower()}_gamma_t", f"{name} γ t 值", res.gamma_t, RATIO, _se_label(res))
 
+    factor = None
+    factor_error = None
+    if factor_returns is not None:
+        if not isinstance(factor_returns, pd.DataFrame) or not isinstance(factor_returns.index, pd.DatetimeIndex):
+            raise schema.SchemaError("factor_returns 须为以 DatetimeIndex 为索引的 DataFrame")
+        factor_type = labels.get("factor_type") or factor_returns.attrs.get(FACTOR_TYPE_ATTR)
+        fr = factor_returns.astype(float).reindex(p.index)
+        gaps = fr.isna().any(axis=1)
+        if gaps.any():
+            cols = [c for c in fr.columns if fr[c].isna().any()]
+            raise ValueError(
+                f"因子收益未覆盖全部 {len(p)} 个共同期：{'、'.join(map(str, cols))} 缺 {int(gaps.sum())} 期"
+                f"（首个 {p.index[gaps.to_numpy()][0]:%Y-%m-%d}），请缩短区间或更换因子"
+            )
+        fr.attrs[FACTOR_TYPE_ATTR] = factor_type
+        try:
+            factor = factor_decomposition(p, fr, rf, hac_lags=hac_lags, use_t=use_t)
+        except ValueError as exc:
+            factor_error = str(exc)
+    if factor is not None:
+        se = _se_label(factor.regression)
+        proxy = "；指数代理因子" if factor.index_proxy else ""
+        names = "、".join(factor.contributions.index)
+        add(s, "factor_alpha", "多因子 Alpha（每期）", factor.alpha, PCT, f"截距，因子 {names}{proxy}")
+        add(s, "factor_alpha_annualized", "多因子 Alpha（算术年化）", factor.annualized_alpha(k), PCT, "α × K，算术口径")
+        add(s, "factor_alpha_t", "多因子 Alpha t 值", factor.alpha_t, RATIO, se)
+        add(s, "factor_alpha_p", "多因子 Alpha p 值", factor.alpha_p, RATIO, "双侧")
+        add(s, "factor_r_squared", "多因子 R²", factor.rsquared, RATIO)
+        add(s, "factor_n", "多因子回归样本期数 n", factor.n, COUNT)
+        for name in factor.contributions.index:
+            add(s, f"factor_beta_{name}", f"因子暴露：{name}", float(factor.betas[name]), RATIO,
+                f"t = {float(factor.regression.tvalues[name]):.2f}")
+            add(s, f"factor_contribution_{name}", f"因子贡献：{name}（算术年化）",
+                float(factor.contributions[name]) * k, PCT, "β × 因子均值 × K")
+
     # ------------------------------ 收益来源：风格分析 ------------------------------
     style = style_roll = None
     if style_returns is None and style_window is not None:
@@ -496,6 +623,46 @@ def evaluate(
             add(s, "style_window", "滚动窗口", style_roll.window, COUNT, f"期，共 {len(style_roll.weights)} 个窗口")
         if style.collinear_pairs:
             notes.append(f"风格分析：{style.diagnostics['collinearity_warning']}。")
+
+    # ------------------------------ 成本与容量 ------------------------------
+    cost_result = None
+    capacity = None
+    fee_label = labels.get("fees", DEFAULT_FEE_BASIS)
+    if costs is not None:
+        if not isinstance(costs, Mapping):
+            raise ValueError("costs 须为字典（turnover、unit_cost、other_fees 等）")
+        if factor is not None:
+            alpha_annual, alpha_name = factor.annualized_alpha(k), "多因子 Alpha"
+        elif capm is not None:
+            alpha_annual, alpha_name = capm.annualized_alpha(k), "CAPM Alpha"
+        else:
+            alpha_annual, alpha_name = float("nan"), "Alpha"
+        cost_result = _cost_block(costs, alpha_annual, alpha_name, fee_label)
+        s = "成本与容量"
+        add(s, "turnover", "换手率 TO（年化）", cost_result["turnover"], PCT, "Σ(|B| + |S|) / (2 × 平均资产净值)")
+        add(s, "unit_cost", "单位成交额成本 c", cost_result["unit_cost"], PCT, "小数口径，20 bp = 0.20%")
+        add(s, "trade_cost", "交易成本率（年化）", cost_result["trade_cost"], PCT, cost_result["trade_note"])
+        add(s, "other_fees", "其他费用（年化）", cost_result["other_fees"], PCT, "管理费、托管费等")
+        add(s, "gross_alpha", "费用前 Alpha（算术年化）", cost_result["gross_alpha"], PCT, cost_result["basis"])
+        add(s, "net_alpha", "近似净 Alpha（算术年化）", cost_result["net_alpha"], PCT,
+            "同期间、同资产基数下的近似；严格口径须对扣费后净收益序列重新回归")
+        if cost_result["deducted"]:
+            notes.append(f"成本与容量：{NAV_FEE_NOTE}；报告的净 Alpha 即{cost_result['alpha_name']}。")
+        if "capacity" in costs:
+            cap = costs["capacity"]
+            try:
+                capacity = cost_mod.capacity_check(
+                    cap["trade_amount"], cap["adv"], cap["max_participation"], cap.get("days", 1)
+                )
+            except KeyError as exc:
+                raise ValueError("costs['capacity'] 须包含 trade_amount、adv 与 max_participation（可选 days）") from exc
+            over = int((capacity["是否超限"] == "是").sum())
+            add(s, "capacity_assets", "容量检查资产数", len(capacity), COUNT)
+            add(s, "capacity_over_limit", "所需参与率超过上限的资产数", over, COUNT,
+                f"上限 {float(cap['max_participation']):.0%}，可用 {cap.get('days', 1)} 天")
+            add(s, "capacity_max_participation", "最大所需参与率", float(capacity["所需参与率"].max()), PCT,
+                "交易金额 / (日均成交额 × 可用天数)")
+            cost_result["capacity_over"] = list(capacity.index[capacity["是否超限"] == "是"])
 
     # ------------------------------ 持续监控 ------------------------------
     monitoring = None
@@ -556,7 +723,13 @@ def evaluate(
             scope["风格指数数据源"] = labels["style_source"]
     scope["市场代理"] = labels.get("market", "市场") if market is not None else ("以基准代替" if b is not None else "未提供")
     scope["无风险收益"] = _rf_description(risk_free, labels)
-    scope["费用口径"] = labels.get("fees", DEFAULT_FEE_BASIS)
+    if factor is not None:
+        scope["因子"] = labels.get("factors", "、".join(map(str, factor.contributions.index)))
+        if factor.index_proxy:
+            scope["因子类型"] = PROXY_CAVEAT
+        if "factor_source" in labels:
+            scope["因子数据源"] = labels["factor_source"]
+    scope["费用口径"] = fee_label
     scope["比率口径"] = "同频算术均值与样本标准差（n−1），乘以 √K 年化；累计与年化收益为几何口径"
     if market_proxy:
         notes.append("未提供市场收益，Treynor、CAPM 与择时回归以基准代替市场。")
@@ -565,14 +738,25 @@ def evaluate(
     not_done = []
     if style is None:
         not_done.append(("风格分析（第五部分第 1 节）", "未做", "未提供风格指数收益（CLI 用 --style，Python 用 style_returns）"))
+    if factor is None:
+        reason = (
+            f"回归失败：{factor_error}" if factor_error is not None
+            else "未提供因子收益（CLI 用 --factors cn_index_proxy，Python 用 factor_returns）"
+        )
+        not_done.append(("多因子分解（第五部分第 3 节）", "未做", reason))
     not_done += [
-        ("多因子分解（第五部分第 3 节）", "未做", "尚未实现，需因子收益数据（French 等数据源待加入）"),
         ("Brinson 归因（第五部分第 2 节）", "未做", "需要持仓与行业权重；持仓齐备后可用 fundeval.attribution.brinson"),
         ("样本外检验（第四部分第 3 节）", "未做", "报告只做全样本估计；样本外须事前规定切分点（alpha.rolling.split_in_out_of_sample）"),
-        ("扣费后净 Alpha 重估（第六部分）", "未做", f"当前为{scope['费用口径']}；毛费用拆分与交易成本需费率数据，costs 模块待实现"),
-        ("交易容量（第六部分）", "未做", "需要持仓、成交量与冲击成本数据"),
-        ("资金加权收益 MWR（第二部分）", "未做", "需要申购赎回现金流"),
     ]
+    if cost_result is None:
+        not_done.append(("扣费后净 Alpha（第六部分）", "未做",
+                         f"当前为{fee_label}；未给出换手率与成本（Python 用 costs，见 fundeval.costs）"))
+    elif not cost_result["deducted"]:
+        not_done.append(("扣费后净 Alpha 重估（第六部分）", "未做",
+                         "报告给出的是近似 α_net ≈ α_gross − c_trade − c_fee；严格口径须对扣费后净收益序列重新回归"))
+    if capacity is None:
+        not_done.append(("交易容量（第六部分）", "未做", "需要持仓交易金额与日均成交额（costs['capacity']，见 costs.capacity_check）"))
+    not_done.append(("资金加权收益 MWR（第二部分）", "未做", "需要申购赎回现金流"))
     if b is None:
         not_done.append(("相对基准指标（TE、IR、M²）", "未做", "未提供基准收益"))
     if m is None:
@@ -604,6 +788,9 @@ def evaluate(
         robustness=robust,
         style=style,
         style_rolling=style_roll,
+        factor=factor,
+        costs=cost_result,
+        capacity=capacity,
     )
 
 
@@ -727,7 +914,8 @@ def conclusion(report: EvaluationReport) -> str:
         ]
         if timing_text:
             reminder = ""
-            if any(res.gamma_t > -T_THRESHOLD for res in r.timing.values() if res is not None):
+            # 只有至少一个 γ 显著为正时才需要提醒非线性策略的替代解释
+            if any(res.gamma > 0 and res.gamma_t >= T_THRESHOLD for res in r.timing.values() if res is not None):
                 reminder = "γ 显著为正也可能来自期权类或动态风险控制等非线性策略，不能单凭 γ 认定择时能力。"
             sup.append("；".join(timing_text) + "。" + reminder)
         if r.robustness is not None and r.robustness.sensitive:
@@ -738,6 +926,16 @@ def conclusion(report: EvaluationReport) -> str:
             sup.append(_price_caveat_sentence(r))
         if r.short_sample:
             sup.append(f"样本较短（{r.n} 期，不足 {SHORT_SAMPLE_YEARS * 12} 个月），上述表现不足以支持能力判断。")
+    if r.factor is not None:
+        f = r.factor
+        text = (
+            f"多因子回归（{'、'.join(f.contributions.index)}）的 Alpha 为每期 {_pct(f.alpha, 3)}"
+            f"（算术年化 {_pct(f.annualized_alpha(k))}），t = {f.alpha_t:.2f}，p = {f.alpha_p:.3f}，"
+            f"R² = {f.rsquared:.2f}，n = {f.n}，{_significance(f.alpha_t)}；{f.exposure_text()}。"
+        )
+        if f.index_proxy:
+            text += f"{PROXY_CAVEAT}。"
+        sup.append(text)
     if r.style is not None:
         top = r.style.top(2)
         names = "与".join(f"{name}（权重 {_pct(w, 1)}）" for name, w in top.items())
@@ -745,6 +943,27 @@ def conclusion(report: EvaluationReport) -> str:
             f"Sharpe 风格分析显示，收益变化最接近{names}（R² = {r.style.r_squared:.2f}，"
             f"残差均值算术年化 {_pct(r.style.annualized_residual_mean(k))}，n = {r.style.n}）；{STYLE_CAVEAT}。"
         )
+    if r.costs is not None:
+        c = r.costs
+        cost_text = f"成本方面：交易成本率约 {_pct(c['trade_cost'])}（年化，{c['trade_note']}）"
+        if np.isfinite(c["turnover"]):
+            cost_text += f"，对应换手率 {_pct(c['turnover'], 0)}"
+            if np.isfinite(c["unit_cost"]):
+                cost_text += f"、单位成交额成本 {c['unit_cost'] * 1e4:.0f} 个基点"
+        cost_text += f"，其他费用 {_pct(c['other_fees'])}；"
+        if c["deducted"]:
+            cost_text += (
+                f"{NAV_FEE_NOTE}，近似净 Alpha 即{c['alpha_name']} {_pct(c['net_alpha'])}（算术年化），"
+                f"加回成本反推的费用前 Alpha 约 {_pct(c['gross_alpha'])}。"
+            )
+        else:
+            cost_text += (
+                f"费用前 Alpha {_pct(c['gross_alpha'])}，近似净 Alpha 约 {_pct(c['net_alpha'])}（算术年化，"
+                "α_net ≈ α_gross − c_trade − c_fee，同期间、同资产基数下的近似；严格口径须对扣费后净收益序列重新回归）。"
+            )
+        if c.get("capacity_over"):
+            cost_text += f"容量检查中所需参与率超过上限的资产：{'、'.join(map(str, c['capacity_over']))}。"
+        sup.append(cost_text)
     if has("sortino"):
         sup.append(
             f"下行风险方面，Sortino 比率 {format_value(r.metric('sortino'), RATIO)}（年化），"
