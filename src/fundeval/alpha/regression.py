@@ -29,8 +29,9 @@ class RegressionResult:
     """回归结果。系数按 ``alpha`` 在前、各因子在后排列，收益单位与输入同频。
 
     ``cov_type`` 为 ``"nonrobust"``（普通 OLS 标准误）或 ``"HAC"``（Newey–West），
-    ``hac_lags`` 为 HAC 滞后阶数，普通 OLS 时为 None。HAC 下 p 值与置信区间沿用
-    statsmodels 默认的正态近似；普通 OLS 下使用自由度 n - k - 1 的 t 分布。
+    ``hac_lags`` 为 HAC 滞后阶数，普通 OLS 时为 None。``use_t`` 记录 p 值与置信区间实际
+    采用的分布：True 为自由度 n - k - 1 的 t 分布，False 为标准正态近似。默认情况下
+    普通 OLS 用 t 分布，HAC 沿用 statsmodels 默认的正态近似。
     """
 
     params: pd.Series
@@ -43,6 +44,7 @@ class RegressionResult:
     n: int
     cov_type: str
     hac_lags: int | None
+    use_t: bool
     resid: pd.Series = field(repr=False)
     model_result: Any = field(repr=False, compare=False)
 
@@ -137,13 +139,28 @@ def _check_lags(hac_lags) -> int | None:
     return int(hac_lags)
 
 
-def fit_ols(y: pd.Series, x: pd.DataFrame, hac_lags: int | None = None) -> RegressionResult:
+def _check_use_t(use_t) -> bool | None:
+    if use_t is None or isinstance(use_t, (bool, np.bool_)):
+        return None if use_t is None else bool(use_t)
+    raise ValueError(f"use_t 须为 True、False 或 None，收到 {use_t!r}")
+
+
+def fit_ols(
+    y: pd.Series, x: pd.DataFrame, hac_lags: int | None = None, use_t: bool | None = None
+) -> RegressionResult:
     """对 y = α + x·β + ε 做 OLS，返回 RegressionResult。
 
     y 与 x 须已对齐；任一变量缺失的期整行剔除（不补零），n 为实际参与回归的期数。
     供 factor_regression 与 attribution.timing 复用。
+
+    ``use_t`` 决定 p 值与置信区间所用的分布：None 保持 statsmodels 默认（普通 OLS 用
+    t 分布，HAC 用标准正态近似）；True 时 HAC 也改用自由度 n - k - 1 的 t 分布；
+    False 时两者都用正态近似。小样本下正态近似的尾部偏薄，会低估 p 值、收窄置信区间，
+    即高估显著性；月度样本只有几十期时，HAC 建议设 ``use_t=True``。
     """
     lags = _check_lags(hac_lags)
+    use_t = _check_use_t(use_t)
+    fit_kwargs = {} if use_t is None else {"use_t": use_t}
     data = pd.concat([y.rename("__y__"), x], axis=1).dropna()
     k = x.shape[1]
     if len(data) <= k + 1:
@@ -153,10 +170,10 @@ def fit_ols(y: pd.Series, x: pd.DataFrame, hac_lags: int | None = None) -> Regre
     )
     model = sm.OLS(data["__y__"], exog)
     if lags is None:
-        res = model.fit()
+        res = model.fit(**fit_kwargs)
         cov_type = "nonrobust"
     else:
-        res = model.fit(cov_type="HAC", cov_kwds={"maxlags": lags})
+        res = model.fit(cov_type="HAC", cov_kwds={"maxlags": lags}, **fit_kwargs)
         cov_type = "HAC"
     ci = res.conf_int(alpha=0.05)
     ci.columns = ["lower", "upper"]
@@ -171,6 +188,7 @@ def fit_ols(y: pd.Series, x: pd.DataFrame, hac_lags: int | None = None) -> Regre
         n=int(res.nobs),
         cov_type=cov_type,
         hac_lags=lags,
+        use_t=bool(res.use_t),
         resid=res.resid.rename("resid"),
         model_result=res,
     )
@@ -182,7 +200,9 @@ def excess_frame(returns, factors, risk_free=0.0) -> tuple[pd.Series, pd.DataFra
     return (r - broadcast_like(risk_free, r)).rename("excess"), f
 
 
-def factor_regression(returns, factors, risk_free=0.0, hac_lags: int | None = None) -> RegressionResult:
+def factor_regression(
+    returns, factors, risk_free=0.0, hac_lags: int | None = None, use_t: bool | None = None
+) -> RegressionResult:
     """多因子时间序列回归 r_p,t - r_f,t = α + Σ β_k F_k,t + ε_t。
 
     ``factors`` 为 DataFrame（每列一个因子，列名即系数名）、Series 或数组。
@@ -192,22 +212,30 @@ def factor_regression(returns, factors, risk_free=0.0, hac_lags: int | None = No
     ``hac_lags`` 为 None 时用普通 OLS 标准误；为整数 L 时用 Newey–West（HAC，
     Bartlett 核，最大滞后 L）稳健标准误，结果的 ``hac_lags`` 记录 L。
 
+    ``use_t`` 为 None 时保持默认（OLS 用 t 分布，HAC 用正态近似）；为 True 时 HAC 的
+    p 值与置信区间也用 t 分布。小样本下正态近似会高估显著性，详见 fit_ols。
+
     任一变量缺失的期整行剔除，结果的 ``n`` 为实际样本期数。
     """
     y, f = excess_frame(returns, factors, risk_free)
-    return fit_ols(y, f, hac_lags)
+    return fit_ols(y, f, hac_lags, use_t)
 
 
-def capm_regression(returns, market, risk_free=0.0, hac_lags: int | None = None) -> RegressionResult:
+def capm_regression(
+    returns, market, risk_free=0.0, hac_lags: int | None = None, use_t: bool | None = None
+) -> RegressionResult:
     """CAPM 单因子回归 r_p,t - r_f,t = α + β (r_m,t - r_f,t) + ε_t。
 
     ``market`` 为市场（或基准代理）的原始收益，函数内部同样减去 ``risk_free``。
     截距与斜率与 fundeval.risk.jensen_alpha、fundeval.risk.beta 在同一数据上完全一致
     （OLS 恒等式），回归额外给出标准误与置信区间。
+
+    ``hac_lags`` 与 ``use_t`` 的含义同 factor_regression；小样本 HAC 建议 ``use_t=True``，
+    否则正态近似会高估显著性。
     """
     r, m = _align(returns, market)
     m_col = m.iloc[:, 0]
     rf = broadcast_like(risk_free, r)
     y = (r - rf).rename("excess")
     x = pd.DataFrame({"market": m_col - rf})
-    return fit_ols(y, x, hac_lags)
+    return fit_ols(y, x, hac_lags, use_t)

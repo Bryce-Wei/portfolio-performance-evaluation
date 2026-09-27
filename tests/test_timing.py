@@ -50,3 +50,15 @@ def test_constant_beta_gamma_not_significant(model):
     res = model(rf + y, m, rf)
     assert res.gamma_p > 0.05
     assert res.beta == pytest.approx(1.05, abs=0.05 if res.model == "HM" else 0.02)
+
+
+@pytest.mark.parametrize("fn", [treynor_mazuy, henriksson_merton])
+def test_timing_use_t_with_hac(fn):
+    m, rf, rng = market(n=30, seed=4)
+    x = m - rf
+    y = 0.001 + 0.9 * x + rng.normal(0, 0.01, len(x))
+    normal = fn(rf + y, m, rf, hac_lags=2)
+    t_dist = fn(rf + y, m, rf, hac_lags=2, use_t=True)
+    assert normal.use_t is False and t_dist.use_t is True
+    assert t_dist.gamma == pytest.approx(normal.gamma)
+    assert t_dist.gamma_p > normal.gamma_p
