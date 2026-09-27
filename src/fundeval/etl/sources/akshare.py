@@ -6,7 +6,8 @@ akshare 是可选依赖，按需延迟导入；未安装时报错并提示 ``pip
 
 - 基金：``fund_open_fund_info_em(symbol, indicator, period)``，东方财富（天天基金）源。
   indicator="单位净值走势" 返回 净值日期、单位净值、日增长率（百分数）；
-  indicator="分红送配详情" 返回 年份、权益登记日、除息日、每份分红（如“每份派现金0.0500元”）、分红发放日；
+  indicator="分红送配详情" 返回 年份、权益登记日、除息日、每10份分红（如“每10份派现金9.0000元”，
+  即每 10 份的金额，已用真实返回核对）、分红发放日；旧格式的“每份分红”列也接受；
   indicator="累计净值走势" 返回 净值日期、累计净值
 - 指数：``index_zh_a_hist(symbol, period, start_date, end_date)``（东方财富，中证、国证、上证等 A 股指数），
   ``stock_zh_index_hist_csindex(symbol, start_date, end_date)``（中证指数官网，如 H11001 中证全债），
@@ -26,7 +27,9 @@ akshare 是可选依赖，按需延迟导入；未安装时报错并提示 ``pip
 但一定发出警告并注明“使用 YYYY-MM-DD 的缓存数据”。
 
 网络类异常（requests.RequestException 及其子类、ConnectionError、TimeoutError）按指数退避
-共尝试 MAX_ATTEMPTS 次，其他异常不重试。指数行情默认 ``source="auto"``：纯数字代码先走
+共尝试 MAX_ATTEMPTS 次，其他异常不重试。每次请求有 ``timeout`` 秒（默认 DEFAULT_TIMEOUT = 30）
+的总时限：akshare 内部调用 requests 时多未设超时，挂起的请求不会抛异常，因此在调用期间为
+requests 注入默认超时，并以守护线程限定总时长，超时按网络类异常重试或切换数据源。指数行情默认 ``source="auto"``：纯数字代码先走
 东方财富，网络失败后改用中证指数官网；无风险利率 ``source="auto"`` 按 RF_AUTO_ORDER
 （Shibor 3M → 国债 2 年）依次尝试，全部失败时报错，不静默改用常数。所有自动切换与缓存
 回退都发出 RuntimeWarning，并写入 collect_notes() 收集的附注，供报告使用。
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import threading
 import time
 import warnings
 from collections.abc import Callable, Iterator
@@ -77,7 +81,8 @@ FUND_DIVIDEND = {
     "func": "fund_open_fund_info_em",
     "kwargs": {"indicator": "分红送配详情"},
     "ex_date": "除息日",
-    "amount": "每份分红",
+    "amount": "每10份分红",  # 值如“每10份派现金9.0000元”，按每 10 份计
+    "legacy_amount": "每份分红",  # 旧格式，按每份计
 }
 INDEX_EM = {
     "func": "index_zh_a_hist",
@@ -152,6 +157,9 @@ INDEX_SOURCE_LABELS = {
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF = 1.0
 
+#: 每次上游请求的默认超时（秒）。akshare 内部调用 requests 时多未设 timeout，请求可能无限挂起
+DEFAULT_TIMEOUT = 30.0
+
 #: 缓存覆盖范围允许的滞后（自然日）与无日期接口、end 为 None 时的缓存有效期
 CACHE_LAG_DAYS = 7
 CACHE_MAX_AGE = pd.Timedelta(days=1)
@@ -163,6 +171,10 @@ class AkshareInterfaceError(RuntimeError):
 
 class DataSourceUnavailable(ConnectionError):
     """自动切换的全部候选数据源都因网络原因失败。"""
+
+
+class UpstreamTimeout(TimeoutError):
+    """上游请求超过超时秒数仍未返回；按网络类异常处理（重试或切换数据源）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +204,85 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _with_retry(fetch: Callable[[], pd.DataFrame]) -> pd.DataFrame:
-    """网络类异常按指数退避共尝试 MAX_ATTEMPTS 次，最后一次仍失败时抛出；其他异常立即抛出。"""
+_TIMEOUT_LOCK = threading.Lock()
+_TIMEOUT_STATE: dict = {"depth": 0, "timeout": None, "original": None}
+
+
+@contextlib.contextmanager
+def _requests_default_timeout(timeout: float) -> Iterator[None]:
+    """调用期间临时包装 requests.Session.request：调用方未给 timeout 时注入默认超时。
+
+    akshare 用 requests.get 等函数发请求，最终都经过 Session.request；注入后挂起的连接会在
+    超时后抛出 requests.Timeout，工作线程随之结束。未安装 requests 时不做任何事。
+    """
+    try:
+        import requests
+    except ImportError:  # pragma: no cover - requests 随 akshare 安装
+        yield
+        return
+    with _TIMEOUT_LOCK:
+        if _TIMEOUT_STATE["depth"] == 0:
+            original = requests.Session.request
+
+            def request(self, method, url, **kwargs):
+                if kwargs.get("timeout") is None and _TIMEOUT_STATE["timeout"] is not None:
+                    kwargs["timeout"] = _TIMEOUT_STATE["timeout"]
+                return original(self, method, url, **kwargs)
+
+            _TIMEOUT_STATE["original"] = original
+            requests.Session.request = request
+        _TIMEOUT_STATE["depth"] += 1
+        previous = _TIMEOUT_STATE["timeout"]
+        _TIMEOUT_STATE["timeout"] = timeout
+    try:
+        yield
+    finally:
+        with _TIMEOUT_LOCK:
+            _TIMEOUT_STATE["timeout"] = previous
+            _TIMEOUT_STATE["depth"] -= 1
+            if _TIMEOUT_STATE["depth"] == 0:
+                requests.Session.request = _TIMEOUT_STATE["original"]
+                _TIMEOUT_STATE["original"] = None
+
+
+def _call_with_timeout(fetch: Callable[[], pd.DataFrame], timeout: float | None, name: str) -> pd.DataFrame:
+    """在守护线程中调用 fetch()，超过 timeout 秒未返回时抛出 UpstreamTimeout。
+
+    两层保护：requests 层注入默认超时，让挂起的连接自行结束；线程层以 timeout 为总时限，
+    不依赖上游是否使用 requests。超时后工作线程若仍未结束，作为守护线程留在后台，
+    不阻塞程序退出。``timeout`` 为 None 时直接调用。
+    """
+    if timeout is None:
+        return fetch()
+    if timeout <= 0:
+        raise ValueError(f"timeout 须为正数或 None，收到 {timeout!r}")
+    box: dict = {}
+
+    def run():
+        try:
+            box["value"] = fetch()
+        except BaseException as exc:  # 在调用线程中重新抛出
+            box["error"] = exc
+
+    with _requests_default_timeout(timeout):
+        worker = threading.Thread(target=run, name=f"fundeval-{name}", daemon=True)
+        worker.start()
+        worker.join(timeout)
+    if worker.is_alive():
+        raise UpstreamTimeout(f"{name} 超过 {timeout:g} 秒未返回")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _with_retry(fetch: Callable[[], pd.DataFrame], *, timeout: float | None = DEFAULT_TIMEOUT, name: str = "上游接口") -> pd.DataFrame:
+    """网络类异常（含超时）按指数退避共尝试 MAX_ATTEMPTS 次，最后一次仍失败时抛出；其他异常立即抛出。
+
+    每次尝试都受 ``timeout`` 秒的总时限约束（见 _call_with_timeout），超时视为网络类异常。
+    """
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            return fetch()
+            return _call_with_timeout(fetch, timeout, name)
         except Exception as exc:
             if not is_network_error(exc) or attempt == MAX_ATTEMPTS:
                 raise
@@ -339,6 +425,7 @@ def _cached_call(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
     date_col: str | None = None,
     coverage_end=None,
     dated: bool = True,
@@ -347,6 +434,7 @@ def _cached_call(
 
     ``coverage_end`` 为调用方请求的截止日期，用于覆盖范围检查；``dated=False`` 表示接口不接受
     日期参数（总是返回全历史），此时另按 ``cache_max_age`` 检查缓存文件的新旧。
+    ``timeout`` 为每次上游请求的超时秒数（见 _with_retry）。
     重新拉取遇到网络类异常且已有旧缓存时回退到旧缓存，发出警告并写入附注。
     """
     path = cache_path(cache_dir, interface, code, start, end)
@@ -360,7 +448,7 @@ def _cached_call(
         if reason is None:
             return cached
     try:
-        df = _with_retry(fetch)
+        df = _with_retry(fetch, timeout=timeout, name=f"{interface}（{code}）")
     except Exception as exc:
         if cached is None or not is_network_error(exc):
             raise
@@ -395,10 +483,10 @@ def _call(
     )
 
 
-def _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age) -> dict:
+def _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout) -> dict:
     return dict(
         cache_dir=cache_dir, use_cache=use_cache, refresh=refresh,
-        cache_lag_days=cache_lag_days, cache_max_age=cache_max_age,
+        cache_lag_days=cache_lag_days, cache_max_age=cache_max_age, timeout=timeout,
     )
 
 
@@ -422,17 +510,31 @@ def _slice(obj, start, end):
 # ---------------------------------------------------------------------------
 
 _AMOUNT = re.compile(r"(\d+(?:\.\d+)?)\s*元")
+_UNITS = re.compile(r"每\s*(\d*)\s*份")
 
 
-def _parse_dividend_amount(value) -> float:
-    """解析“每份派现金0.0500元”或数值形式的每份分红；无法解析时报错，不猜测。"""
-    if isinstance(value, (int, float, np.integer, np.floating)) and np.isfinite(value):
-        return float(value)
+def _parse_dividend_amount(value, units: int | None = None) -> float:
+    """把分红记录换算为每份现金分红（元）。
+
+    - 文字：“每10份派现金9.0000元” → 9.0 / 10 = 0.9；“每份派现金0.0500元” → 0.05。
+      文字中写明的份数优先；写不出份数或金额的一律报错，不猜测
+    - 数值：须由 ``units`` 给出每多少份（来自列名，如“每10份分红”为 10），否则报错
+    """
+    if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
+        if not np.isfinite(value):
+            raise schema.SchemaError(f"无法解析分红金额：{value!r}")
+        if units is None:
+            raise schema.SchemaError(f"分红金额 {value!r} 未说明按每多少份计，无法换算为每份分红")
+        return float(value) / units
     text = str(value)
-    match = _AMOUNT.search(text)
-    if match is None:
-        raise schema.SchemaError(f"无法解析每份分红：{text!r}")
-    return float(match.group(1))
+    amount = _AMOUNT.search(text)
+    unit_match = _UNITS.search(text)
+    if amount is None or unit_match is None:
+        raise schema.SchemaError(f"无法解析分红金额或份数：{text!r}（应形如“每10份派现金9.0000元”）")
+    n = int(unit_match.group(1)) if unit_match.group(1) else 1
+    if n <= 0:
+        raise schema.SchemaError(f"分红份数无效：{text!r}")
+    return float(amount.group(1)) / n
 
 
 def _dividends(raw: pd.DataFrame, nav_index: pd.DatetimeIndex) -> pd.Series:
@@ -440,9 +542,19 @@ def _dividends(raw: pd.DataFrame, nav_index: pd.DatetimeIndex) -> pd.Series:
     out = pd.Series(0.0, index=nav_index)
     if raw.empty:
         return out
-    _require_columns(raw, [FUND_DIVIDEND["ex_date"], FUND_DIVIDEND["amount"]], FUND_DIVIDEND["func"])
+    if FUND_DIVIDEND["amount"] in raw.columns:
+        amount_col, units = FUND_DIVIDEND["amount"], 10
+    elif FUND_DIVIDEND["legacy_amount"] in raw.columns:
+        amount_col, units = FUND_DIVIDEND["legacy_amount"], 1
+    else:
+        raise AkshareInterfaceError(
+            f"{FUND_DIVIDEND['func']} 返回的分红数据缺少金额列 {FUND_DIVIDEND['amount']!r} 或 "
+            f"{FUND_DIVIDEND['legacy_amount']!r}（实际列：{list(raw.columns)}）；上游列名可能已变化，"
+            f"请更新 fundeval.etl.sources.akshare 的映射（已核对版本 {VERIFIED_VERSION}）"
+        )
+    _require_columns(raw, [FUND_DIVIDEND["ex_date"]], FUND_DIVIDEND["func"])
     ex_dates = _to_dates(raw[FUND_DIVIDEND["ex_date"]])
-    amounts = [_parse_dividend_amount(v) for v in raw[FUND_DIVIDEND["amount"]]]
+    amounts = [_parse_dividend_amount(v, units) for v in raw[amount_col]]
     for date, amount in zip(ex_dates, amounts):
         if pd.isna(date):
             raise schema.SchemaError("分红记录的除息日无法解析")
@@ -462,6 +574,7 @@ def fund_nav(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ) -> pd.DataFrame:
     """开放式基金单位净值、日增长率与除息日分红。
 
@@ -469,7 +582,7 @@ def fund_nav(
     日增长率，已由百分数换算为小数）、``dividend``（除息日每份现金分红，其余日期为 0）。
     结果截取到 [start, end]。累计净值没有做分红再投资，这里不使用。
     """
-    frame = _fund_frame(code, end, _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age))
+    frame = _fund_frame(code, end, _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout))
     return _slice(frame, start, end)
 
 
@@ -498,6 +611,7 @@ def fund_returns(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ):
     """基金单期总收益（小数），由单位净值加分红计算：r_t = (NAV_t + D_t) / NAV_{t-1} − 1。
 
@@ -511,7 +625,7 @@ def fund_returns(
     ``freq`` 为 W/M/Q/A 时用 etl.returns.to_frequency 合成为该频率（期内有缺失则为 NaN），
     核对表仍为日度。首个收益需要 start 之前一个净值，本函数取全历史计算后再截取区间。
     """
-    frame = _fund_frame(code, end, _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age))
+    frame = _fund_frame(code, end, _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout))
     nav = frame[schema.NAV].dropna()
     if len(nav) < len(frame):
         warnings.warn(f"基金 {code} 有 {len(frame) - len(nav)} 个日期单位净值缺失，已跳过这些日期", RuntimeWarning, stacklevel=2)
@@ -541,6 +655,7 @@ def fund_accumulated_nav(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ) -> pd.Series:
     """累计净值（单位净值 + 累计分红），仅供核对与展示。
 
@@ -549,7 +664,7 @@ def fund_accumulated_nav(
     """
     spec = FUND_ACCUMULATED_NAV
     raw = _call(
-        spec, code, None, None, _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age),
+        spec, code, None, None, _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout),
         date_col=spec["date"], coverage_end=end, dated=False, symbol=code,
     )
     _require_columns(raw, [spec["date"], spec["value"]], spec["func"])
@@ -606,6 +721,7 @@ def index_prices(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ) -> pd.Series:
     """指数日收盘点位（中债为财富指数值），含 start 之前约 40 个自然日，供计算首日收益。
 
@@ -614,7 +730,7 @@ def index_prices(
     发出 RuntimeWarning 并写入 collect_notes() 的附注。实际使用的数据源记录在结果的
     ``attrs["source"]``（em / csindex / cbond）与 ``attrs["source_label"]``。
     """
-    cache = _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age)
+    cache = _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout)
     fetch_start = None if start is None else pd.Timestamp(start) - pd.Timedelta(days=_LOOKBACK_DAYS)
     fallback = None
     if source in (None, "auto"):
@@ -654,6 +770,7 @@ def index_returns(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ) -> pd.Series:
     """指数单期收益（小数）：r_t = P_t / P_{t-1} − 1，P 为收盘点位。
 
@@ -666,7 +783,7 @@ def index_returns(
     """
     price = index_prices(
         code, start, end, source=source, cache_dir=cache_dir, use_cache=use_cache, refresh=refresh,
-        cache_lag_days=cache_lag_days, cache_max_age=cache_max_age,
+        cache_lag_days=cache_lag_days, cache_max_age=cache_max_age, timeout=timeout,
     )
     r = _slice(price_to_returns(price).rename(code), start, end)
     out = to_frequency(r, freq).rename(code) if freq else r
@@ -689,6 +806,7 @@ def rate_series(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ) -> pd.Series:
     """年化利率序列（小数），来源见 RATE_SOURCES，如 "shibor3m"、"cgb10y"。"""
     if source not in RATE_SOURCES:
@@ -701,7 +819,7 @@ def rate_series(
     dated = "start_arg" in spec
     if dated:
         kwargs[spec["start_arg"]] = "19901219" if fetch_start is None else fetch_start.strftime("%Y%m%d")
-    cache = _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age)
+    cache = _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout)
     # 不接受日期参数的接口总是返回全历史，缓存不按日期区间分键
     raw = _call(
         spec, source, fetch_start if dated else None, end if dated else None, cache,
@@ -728,6 +846,7 @@ def risk_free_returns(
     refresh: bool = False,
     cache_lag_days: int = CACHE_LAG_DAYS,
     cache_max_age=CACHE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
 ) -> pd.Series:
     """把年化利率换算为每期无风险收益，采用复利口径 r_f = (1 + y)^(1/K) − 1。
 
@@ -769,7 +888,7 @@ def risk_free_returns(
         try:
             rate = rate_series(
                 name, start, end, cache_dir=cache_dir, use_cache=use_cache, refresh=refresh,
-                cache_lag_days=cache_lag_days, cache_max_age=cache_max_age,
+                cache_lag_days=cache_lag_days, cache_max_age=cache_max_age, timeout=timeout,
             )
         except Exception as exc:
             if source != "auto" or not is_network_error(exc):

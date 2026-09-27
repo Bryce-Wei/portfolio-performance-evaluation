@@ -151,10 +151,62 @@ def test_fund_returns_monthly(fake, cache):
 
 
 def test_dividend_amount_parsing():
-    assert aks._parse_dividend_amount("每份派现金0.0500元") == 0.05
-    assert aks._parse_dividend_amount(0.12) == 0.12
-    with pytest.raises(ValueError):
-        aks._parse_dividend_amount("每10份派现金若干")
+    # 真实格式：每 10 份的金额，换算为每份
+    assert aks._parse_dividend_amount("每10份派现金9.0000元") == pytest.approx(0.9)
+    assert aks._parse_dividend_amount("每10份派现金0.5000元", 10) == pytest.approx(0.05)
+    assert aks._parse_dividend_amount("每份派现金0.0500元") == pytest.approx(0.05)  # 旧格式
+    assert aks._parse_dividend_amount(9.0, 10) == pytest.approx(0.9)
+    assert aks._parse_dividend_amount(0.12, 1) == 0.12
+    for bad in ("每10份派现金若干", "派现金9.0000元"):  # 缺金额或缺份数：报错，不猜测
+        with pytest.raises(ValueError):
+            aks._parse_dividend_amount(bad, 10)
+    with pytest.raises(ValueError, match="每多少份"):
+        aks._parse_dividend_amount(0.12)
+
+
+# 110011 在 2021-02-25 除息，每10份派现金9.0000元（本地用 akshare 1.18.97 核实的真实数据）
+REAL_EX_DATE = pd.Timestamp("2021-02-25")
+REAL_TOTAL = (8.4677 + 0.9) / 9.4782 - 1  # ≈ −1.1658%
+
+
+def test_real_dividend_per_10_units(fake, cache):
+    r, check = aks.fund_returns("110011", "2021-02-25", "2021-02-25", return_check=True, **cache)
+    assert r.loc[REAL_EX_DATE] == pytest.approx(REAL_TOTAL, abs=1e-12)
+    assert r.loc[REAL_EX_DATE] == pytest.approx(-0.011658, abs=0.5e-6)
+    diff = check.loc[REAL_EX_DATE, "difference"]
+    assert abs(diff) < 1e-4  # 与接口日增长率 −1.17% 相差不到 1 个基点
+    assert not check.loc[REAL_EX_DATE, "flagged"]
+    assert aks.fund_nav("110011", "2021-02-25", "2021-02-25", **cache).loc[REAL_EX_DATE, "dividend"] == pytest.approx(0.9)
+
+
+def test_per_10_amount_mistaken_as_per_unit_is_flagged(monkeypatch, cache):
+    # 反例：把“每10份 9 元”误当每份 9 元，当日推算收益约 +84%，交叉核对必须标记
+    ak = FakeAkshare()
+    wrong = pd.read_csv(DATA / "fund_open_fund_info_em_110011_分红送配详情.csv")
+    wrong = wrong.rename(columns={"每10份分红": "每份分红"})
+    wrong["每份分红"] = wrong["每份分红"].str.replace("每10份", "每份")
+    original = ak.fund_open_fund_info_em
+    ak.fund_open_fund_info_em = lambda symbol, indicator, period="成立来": (
+        wrong if indicator == "分红送配详情" else original(symbol=symbol, indicator=indicator, period=period)
+    )
+    monkeypatch.setattr(aks, "_ak", lambda: ak)
+    with pytest.warns(RuntimeWarning, match="日增长率"):
+        r, check = aks.fund_returns("110011", "2021-02-25", "2021-02-25", return_check=True, **cache)
+    assert r.loc[REAL_EX_DATE] == pytest.approx((8.4677 + 9.0) / 9.4782 - 1)
+    assert r.loc[REAL_EX_DATE] > 0.84
+    assert check.loc[REAL_EX_DATE, "flagged"]
+
+
+def test_dividend_without_amount_column_raises(monkeypatch, cache):
+    ak = FakeAkshare()
+    bad = pd.read_csv(DATA / "fund_open_fund_info_em_110011_分红送配详情.csv").rename(columns={"每10份分红": "分红"})
+    original = ak.fund_open_fund_info_em
+    ak.fund_open_fund_info_em = lambda symbol, indicator, period="成立来": (
+        bad if indicator == "分红送配详情" else original(symbol=symbol, indicator=indicator, period=period)
+    )
+    monkeypatch.setattr(aks, "_ak", lambda: ak)
+    with pytest.raises(aks.AkshareInterfaceError, match="每10份分红"):
+        aks.fund_nav("110011", START, END, **cache)
 
 
 # ------------------------------ 缓存 ------------------------------

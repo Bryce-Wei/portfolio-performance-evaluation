@@ -322,3 +322,74 @@ def test_cli_fallback_to_stale_cache_is_noted_in_report(monkeypatch, tmp_path, s
     assert code == 0
     notes = text.split("## 附注")[1].split("## 结论")[0]
     assert "的缓存数据" in notes and "重新拉取失败" in notes
+
+
+# ------------------------------ 请求超时 ------------------------------
+
+
+@pytest.fixture
+def hanging(monkeypatch):
+    fakes = []
+
+    def make(**kwargs):
+        fake = use(monkeypatch, FakeAkshare(**kwargs))
+        fakes.append(fake)
+        return fake
+
+    yield make
+    for fake in fakes:
+        fake.release()
+
+
+def test_hanging_request_times_out_and_is_retried(hanging, cache, sleeps):
+    fake = hanging(hang={"fund_open_fund_info_em": 30})
+    t0 = time.monotonic()
+    with pytest.raises(aks.UpstreamTimeout, match="超过 0.2 秒未返回"):
+        aks.fund_returns("110011", START, END, timeout=0.2, **cache)
+    assert time.monotonic() - t0 < 5
+    assert fake.count("fund_open_fund_info_em") == 3 and sleeps == [1.0, 2.0]
+    assert aks.is_network_error(aks.UpstreamTimeout("x"))
+
+
+def test_hanging_index_falls_back_to_csindex(hanging, cache, sleeps):
+    fake = hanging(hang={"index_zh_a_hist": 30})
+    with pytest.warns(RuntimeWarning, match="UpstreamTimeout.*已改用中证指数官网"):
+        r = aks.index_returns("000300", START, END, timeout=0.2, **cache)
+    assert r.attrs["source"] == "csindex" and fake.count("index_zh_a_hist") == 3
+
+
+def test_timeout_none_and_invalid(monkeypatch, cache):
+    use(monkeypatch, FakeAkshare())
+    assert len(aks.index_returns("000300", START, END, timeout=None, **cache)) > 30
+    with pytest.raises(ValueError, match="timeout"):
+        aks.index_returns("000300", START, END, timeout=0, use_cache=False)
+
+
+def test_requests_default_timeout_is_injected_only_during_calls(monkeypatch):
+    seen = {}
+    original = requests.Session.request
+
+    def fake_request(self, method, url, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return "ok"
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    assert aks._call_with_timeout(lambda: requests.get("https://example.invalid"), 7.5, "test") == "ok"
+    assert seen["timeout"] == 7.5
+    # 调用方已给 timeout 时不覆盖
+    aks._call_with_timeout(lambda: requests.get("https://example.invalid", timeout=3), 7.5, "test")
+    assert seen["timeout"] == 3
+    # 调用结束后恢复原方法
+    assert requests.Session.request is fake_request and fake_request is not original
+
+
+def test_cli_timeout_gives_friendly_error(hanging, tmp_path, capsys, sleeps):
+    hanging(hang={"fund_open_fund_info_em": 30})
+    t0 = time.monotonic()
+    code = cli.main([
+        "report", "--fund", "110011", "--rf", "0.018", "--start", START, "--end", END,
+        "--timeout", "0.2", "--cache-dir", str(tmp_path / "c"),
+    ])
+    err = capsys.readouterr().err
+    assert code == 2 and time.monotonic() - t0 < 5
+    assert "Traceback" not in err and "网络请求失败" in err and "超过 0.2 秒未返回" in err
