@@ -18,6 +18,10 @@ CSV / Excel（走 etl.sources.files），不依赖网络。
 
 ``--style cn_equity``（或逗号分隔的代码列表，``cash`` 表示无风险收益）在报告“收益来源”一节做
 Sharpe 风格分析，``--style-window 36`` 另附滚动权重；风格指数默认用全收益代码。
+
+``--factors cn_index_proxy`` 在“Alpha 质量”一节做多因子分解（attribution.factor）：MKT = H00300 − 无风险收益，
+SMB = H00852 − H00300，HML = H00919 − H00918，均取中证指数官网全收益指数；这是指数代理因子，
+与 Fama–French 分组构造不同。多因子回归沿用 ``--hac-lags`` 与 ``--use-t``。
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from fundeval.attribution.factor import FACTOR_DESCRIPTIONS, FACTOR_PRESETS, INDEX_PROXY, index_proxy_factors, preset_codes
 from fundeval.etl import schema
 from fundeval.etl.benchmark import (
     CASH,
@@ -202,6 +207,30 @@ def _style_from_akshare(spec, start, end, freq, cache, risk_free, index, *, retu
     return style, labels, notes
 
 
+def _factors_from_akshare(preset, start, end, freq, cache, risk_free, index, *, source="auto"):
+    """联网取因子预设用到的全收益指数并构造指数代理因子，返回 (因子收益表, labels 补充)。"""
+    from fundeval.etl.sources import akshare as aks
+
+    if preset not in FACTOR_PRESETS:
+        raise ValueError(f"未知的因子预设 {preset!r}，可选：{'、'.join(FACTOR_PRESETS)}")
+    comps, sources = {}, []
+    for code in preset_codes(preset):
+        r = aks.index_returns(code, start, end, source=source, freq=None if freq == "D" else freq, **cache)
+        comps[code] = _trim_partial(r, freq, start, end)
+        sources.append(f"{code}：{r.attrs.get('source_label', '未知')}")
+    frame = pd.concat(comps, axis=1).dropna()
+    frame = frame.loc[frame.index.intersection(index)]
+    rf = risk_free.reindex(frame.index) if isinstance(risk_free, pd.Series) else risk_free
+    factors = index_proxy_factors(frame, rf, preset)
+    desc = FACTOR_DESCRIPTIONS.get(preset, {})
+    labels = {
+        "factors": f"{preset}：" + "；".join(f"{name} = {desc.get(name, name)}" for name in factors.columns),
+        "factor_type": INDEX_PROXY,
+        "factor_source": "；".join(sources),
+    }
+    return factors, labels
+
+
 def _build_report_inputs(args):
     freq = args.freq.upper()
     k = schema.periods_per_year(freq)
@@ -289,6 +318,13 @@ def _build_report_inputs(args):
         labels.update(style_labels)
         notes += style_notes
 
+    factor_returns = None
+    if args.factors:
+        factor_returns, factor_labels = _factors_from_akshare(
+            args.factors, args.start, args.end, freq, cache, risk_free, portfolio.index, source=args.index_source
+        )
+        labels.update(factor_labels)
+
     targets = None
     if args.target_te is not None:
         if args.target_active is None or args.window is None:
@@ -309,6 +345,7 @@ def _build_report_inputs(args):
         notes=notes,
         style_returns=style_returns,
         style_window=args.style_window,
+        factor_returns=factor_returns,
     )
 
 
@@ -367,6 +404,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--style",
         help="风格分析：预设名（" + "、".join(STYLE_PRESETS) + "）或逗号分隔的指数代码，cash 表示无风险收益；"
         "指数按 --index-return-type 默认换成全收益代码",
+    )
+    rp.add_argument(
+        "--factors", choices=tuple(FACTOR_PRESETS),
+        help="多因子分解的因子预设：cn_index_proxy（MKT = H00300 − rf，SMB = H00852 − H00300，HML = H00919 − H00918，"
+        "指数代理因子，与学术因子不可直接比较）；回归沿用 --hac-lags 与 --use-t",
     )
     rp.add_argument("--style-window", type=int, help="滚动风格分析的窗口期数（不小于风格资产数 + 2）")
     rp.add_argument("--mar", type=float, help="Sortino 的最低可接受收益（每期，小数）；缺省取无风险收益")

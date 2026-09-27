@@ -8,8 +8,9 @@
 - ``fundeval.risk``：第三部分，波动、回撤、Sharpe、IR、Treynor 与 M²
 - ``fundeval.alpha``：第四部分，因子 / CAPM 回归（含 HAC 标准误）、滚动 Alpha 与 IR、
   样本内外切分、主动管理基本定律
-- ``fundeval.attribution``：第五部分，Brinson 单期（BHB / BF）与多期 Cariño 归因、
-  Treynor–Mazuy 与 Henriksson–Merton 择时回归（风格分析、多因子分解、Campisi 待实现）
+- ``fundeval.attribution``：第五部分，Sharpe 风格分析、Brinson 单期（BHB / BF）与多期 Cariño 归因、
+  多因子分解（含 A 股指数代理因子）、Campisi 固收归因、Treynor–Mazuy 与 Henriksson–Merton 择时回归
+- ``fundeval.costs``：第六部分，换手率、线性交易成本、近似净 Alpha、容量检查与规模敏感性
 - ``fundeval.monitor``：第七部分，实现 TE、风险倍数、z 值与 Green/Yellow/Red 分区
 - ``fundeval.tail``：第八部分，下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES
 - ``fundeval.report``：第九、十部分，一键评价报告、三段结论与 Markdown / Excel 导出
@@ -18,7 +19,7 @@
 约定：所有收益率以小数输入输出（0.02 表示 2%）；K 为一年期数，月度取 12。
 """
 
-from fundeval import alpha, attribution, etl, monitor, report, returns, risk, tail
+from fundeval import alpha, attribution, costs, etl, monitor, report, returns, risk, tail
 
-__all__ = ["etl", "returns", "risk", "alpha", "attribution", "tail", "monitor", "report"]
+__all__ = ["etl", "returns", "risk", "alpha", "attribution", "costs", "tail", "monitor", "report"]
 __version__ = "0.1.0"

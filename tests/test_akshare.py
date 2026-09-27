@@ -443,3 +443,30 @@ def test_network_timing_gamma_sensitive_to_2024_09(tmp_path):
     full, trimmed = rob.full["TM"], rob.trimmed["TM"]
     assert full.gamma == pytest.approx(-0.141, abs=0.01) and full.gamma_t == pytest.approx(-6.22, abs=0.3)
     assert trimmed.gamma == pytest.approx(-0.042, abs=0.01) and trimmed.gamma_t == pytest.approx(-2.02, abs=0.3)
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("fund_code", ["110011", "110020"])
+def test_network_factor_decomposition_cn_index_proxy(tmp_path, fund_code):
+    """110011 与 110020 对 cn_index_proxy 因子（H00300、H00852、H00919、H00918，中证指数官网全收益）的
+    多因子回归，2021-01 至 2025-12 月度，HAC 滞后 3、t 分布：能正常运行，因子暴露为有限值，R² 在 (0, 1) 内。
+    不断言具体数值。"""
+    pytest.importorskip("akshare")
+    from fundeval.attribution.factor import factor_decomposition, index_proxy_factors, preset_codes
+
+    kw = {"cache_dir": tmp_path}
+    start, end = "2021-01-01", "2025-12-31"
+    fund = aks.fund_returns(fund_code, start, end, freq="M", **kw)
+    indices = pd.concat(
+        {code: aks.index_returns(code, start, end, freq="M", source="csindex", **kw) for code in preset_codes("cn_index_proxy")},
+        axis=1,
+    ).dropna()
+    idx = fund.index.intersection(indices.index)
+    rf = aks.risk_free_returns(start, end, "M", source="auto", index=idx, **kw)
+    factors = index_proxy_factors(indices.loc[idx], rf)
+    d = factor_decomposition(fund[idx], factors, rf, hac_lags=3, use_t=True)
+    assert d.n >= 55
+    assert np.isfinite(d.betas).all() and np.isfinite(d.regression.tvalues).all()
+    assert 0 < d.rsquared < 1
+    rec = d.reconciliation(12)
+    assert rec["合计"] == pytest.approx(rec["平均超额收益"])

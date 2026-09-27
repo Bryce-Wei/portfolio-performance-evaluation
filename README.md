@@ -26,7 +26,7 @@
 
 ## 代码：fundeval 工具包
 
-`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、择时模型、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。
+`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、多因子分解（含 A 股指数代理因子）、Campisi 固收归因、择时模型、交易成本与策略容量、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。
 
 | 模块 | 对应章节 | 状态 |
 | --- | --- | --- |
@@ -40,11 +40,12 @@
 | `attribution/style.py`（Sharpe 收益型风格分析：非负、和为 1 的约束回归，R²、残差均值与波动、共线性诊断、滚动风格权重）；`etl/benchmark.py` 的 `style_preset` 风格指数预设 | 五 第 1 节 | 已实现 |
 | `attribution/brinson.py`（单期 BHB / BF、多期 Cariño 链接与对账） | 五 第 2 节 | 已实现 |
 | `attribution/timing.py`（Treynor–Mazuy、Henriksson–Merton） | 五 第 5 节 | 已实现 |
-| `attribution/` 多因子分解（factor）、Campisi | 五 第 3、4 节 | 待实现 |
-| `costs.py` | 六 交易成本 | 待实现 |
+| `attribution/factor.py`（多因子回归、因子暴露与收益贡献对账、A 股指数代理因子预设 `cn_index_proxy`） | 五 第 3 节 | 已实现 |
+| `attribution/campisi.py`（收入、利率、利差、剩余四项；关键期限久期版本；基金对基准的主动归因与对账） | 五 第 4 节 | 已实现 |
+| `costs.py`（换手率、线性交易成本、近似净 Alpha、逐资产容量检查、规模变化的成本敏感性与平方根冲击模型） | 六 交易成本 | 已实现（冲击参数须用成交记录校准） |
 | `monitor.py`（滚动实现 TE（K 须显式给出）、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
 | `tail.py`（下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES） | 八 尾部风险 | 已实现 |
-| `report/`（evaluate 按六个评价维度汇总，含收益来源的风格分析与剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel）与 `cli.py` | 九、十 | 已实现 |
+| `report/`（evaluate 按六个评价维度汇总，含多因子分解、收益来源的风格分析、成本与容量、剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel）与 `cli.py` | 九、十 | 已实现 |
 
 ### 安装
 
@@ -77,6 +78,10 @@ fundeval report --fund 110020 --benchmark 000300 --index-source csindex --rf 0.0
 fundeval report --fund 110020 --benchmark 000300 --style cn_equity --style-window 36 \
     --start 2021-01-01 --end 2025-12-31 --hac-lags 3 --use-t --out report.md
 
+# 多因子分解：A 股指数代理因子 MKT、SMB、HML（中证官网全收益指数），沿用 HAC 与 t 分布
+fundeval report --fund 110011 --benchmark 000300 --factors cn_index_proxy \
+    --start 2021-01-01 --end 2025-12-31 --hac-lags 3 --use-t --out report.md
+
 # 无风险利率按给定顺序尝试：先国债 2 年，失败再用 Shibor 3M
 fundeval report --fund 110011 --benchmark 000300 --rf cgb2y,shibor3m --out report.md
 
@@ -93,6 +98,7 @@ fundeval report --input tests/data/worked_example.csv \
 | `--index-source` | `auto` | `auto`：H 开头等中证代码走中证指数官网，纯数字代码先试东方财富、网络失败后改用中证官网；也可指定 `em` 或 `csindex` |
 | `--rf` | `auto` | `auto`：`--fund` 时等价于 `shibor3m,cgb2y`，依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取单个来源 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y`，逗号分隔的顺序列表（如 `cgb2y,shibor3m`），或常数年化利率（如 `0.018`） |
 | `--style` / `--style-window` | 无 | 风格分析：预设名 `cn_equity`（沪深300成长 H00918、沪深300价值 H00919、中证500 H00905、中证1000 H00852、现金）、`cn_balanced`（再加中证全债 H11001，收益类型未知，报告注明），或逗号分隔的代码列表（`cash` 表示无风险收益）。指数按 `--index-return-type` 默认换成全收益代码，数据源与收益类型写入口径；`--style-window` 另附滚动权重，窗口不小于风格资产数 + 2 |
+| `--factors` | 无 | 多因子分解的因子预设。`cn_index_proxy`：MKT = 沪深300全收益 H00300 − 无风险收益，SMB = 中证1000全收益 H00852 − H00300，HML = 沪深300价值全收益 H00919 − 沪深300成长全收益 H00918，均经中证指数官网取数；不含 UMD。报告在“Alpha 质量”一节给出多因子 Alpha（每期、算术年化、t、p）与因子暴露、贡献表，回归沿用 `--hac-lags` 与 `--use-t` |
 | `--freq` / `--input-freq` | `M` / 同 `--freq` | 评价频率；`--input-freq D --freq M` 先把日度收益按期内复利合成为月度 |
 | `--hac-lags` / `--use-t` | 无 / 关 | Newey–West 标准误的滞后阶数；`--use-t` 让 HAC 的 p 值与置信区间也用 t 分布。月度样本不足 120 期且使用 HAC 时建议加 `--use-t`，否则正态近似会高估显著性 |
 | `--mar` | 无风险收益 | Sortino 的最低可接受收益（每期，小数） |
@@ -124,7 +130,25 @@ Sharpe 收益型风格分析（正文第五部分第 1 节）用约束回归 r_p
 
 指数表另收录沪深300成长 000918 → H00918、沪深300价值 000919 → H00919、中证红利 000922 → H00922（2026-09-27 在中证官网实测，2024 年全收益与价格指数的差异与分红相符），以及中证2000 932000（全收益代码未知，不填；H20932 不是中证2000全收益，不得使用）。中证红利与沪深300价值相关性高，不放进默认预设。
 
-`evaluate` 默认做一次剔除异常期的敏感性分析（正文第四部分第 3 节“稳健性”）：剔除数据质量报告标为异常收益的期（组合、基准或市场任一被标记即剔除），重新估计 CAPM、Treynor–Mazuy 与 Henriksson–Merton 回归，报告两组系数与 t 值。关键系数（CAPM Alpha、TM γ、HM γ）变号或 |t| 跨过 1.96 时，结论写明“结论对 N 个异常期敏感”并列出剔除前后的 t 值；没有异常期时写“无异常期，未做剔除”。本地实测 110020 对 H00300（2021-01 至 2025-12 月度，HAC 滞后 3，t 分布）：TM γ 全样本 −0.141（t = −6.22），剔除 2024-09（基金 +19.28%，指数 +21.11%）后为 −0.042（t = −2.02）。该月未超过默认的异常阈值，可用 `fundeval.alpha.exclusion_sensitivity` 显式指定要剔除的期。
+`evaluate` 默认做一次剔除异常期的敏感性分析（正文第四部分第 3 节“稳健性”）：剔除数据质量报告标为异常收益的期（组合、基准或市场任一被标记即剔除），重新估计 CAPM、Treynor–Mazuy 与 Henriksson–Merton 回归，报告两组系数与 t 值。关键系数（CAPM Alpha、TM γ、HM γ）只在两种情形下算“敏感”：|t| 跨过 1.96（显著性改变），或符号改变且剔除前后至少一边显著。此时结论写明“结论对 N 个异常期敏感”并列出剔除前后的 t 值；两边都不显著时符号变化不算敏感，写“关键系数的符号与显著性结论不变”并注明符号有变化但均不显著；没有异常期时写“无异常期，未做剔除”。本地实测（2021-01 至 2025-12 月度，对 H00300，HAC 滞后 3，t 分布，剔除 2024-09）：110020 的 TM γ 由 −0.141（t = −6.22）变为 −0.042（t = −2.02），仍显著、同号，不算敏感；110011 的 TM γ t 值 −0.79 → 0.51、HM γ t 值 −0.03 → 0.79，变号但两边都不显著，也不算敏感。择时 γ 至少一个显著为正时，结论才附“γ 显著为正也可能来自期权类或动态风险控制等非线性策略”的提醒。该月未超过默认的异常阈值，可用 `fundeval.alpha.exclusion_sensitivity` 显式指定要剔除的期。
+
+### 多因子分解与指数代理因子
+
+`attribution.factor.factor_decomposition(returns, factors, risk_free, hac_lags, use_t)` 复用 `factor_regression` 做 r_p − r_f = α + Σ β_k F_k + ε，另给出各因子的收益贡献 β_k × mean(F_k)（每期；`annualized_contributions(K)` 为算术年化），并按 mean(r_p − r_f) = α + Σ 贡献 + mean(ε) 逐项对账，对不上时报错。`table(K)` 为因子暴露表（系数、t、p、因子均值、贡献），`exposure_text()` 写出显著暴露及方向（如“HML 显著为正，提示价值暴露”）。
+
+`index_proxy_factors(index_returns, risk_free)` 按预设 `cn_index_proxy` 构造 MKT、SMB、HML，`extra=` 可并入自定义因子列（如经过核实的动量因子；默认不构造 UMD）。
+
+**指数代理因子与学术因子的区别**：Fama–French 因子按市值与账面市值比把全市场股票分组，构造多空组合（SMB 为小盘组减大盘组、HML 为高 B/M 组减低 B/M 组），组内市值加权并定期再平衡。`cn_index_proxy` 只是两只只做多的指数收益相减：中证1000 与沪深300 的差异同时包含市值、行业结构与成分调整规则；沪深300价值与成长的划分依据中证的风格评分，且只在沪深300 成分内。因此代理因子的系数只描述基金相对这些指数差值的暴露，不能与学术因子（如 Fama–French 或其他学术 A 股因子）的系数、Alpha 直接比较；报告口径与结论都会写明这一限定。
+
+### Campisi 固收归因
+
+`attribution.campisi.campisi(income, duration, delta_yield, convexity, spread_duration, delta_spread, total_return)` 把债券组合收益拆为收入、利率（−D·Δy + ½·C·Δy²）、利差（−D_spread·Δs）与剩余四项；`duration`、`delta_yield`（及可选 `convexity`）给成按期限索引的 Series 时为关键期限久期版本 −Σ KRD_j·Δy_j。Δy、Δs 用小数（0.0010 = 上升 10 bp），|Δy| > 0.2 视为误用百分数或基点而报错。`campisi_active(fund, benchmark)` 对基金与基准分别归因后逐项相减，并与主动收益对账。正文演示（基金 1.20%、基准 0.80%，主动 0.40 个百分点 = 收入 0.05 + 利率 0.20 + 利差 0.05 + 剩余 0.10）在 `tests/test_campisi.py` 中复现。平行移动近似不适合所有债券；曲线扭曲应使用关键期限久期；含权债券需使用有效久期；剩余项包含个券选择、流动性、估值差异、违约与近似误差，不能全部视为选券能力。
+
+### 交易成本与策略容量
+
+`costs.turnover(buys, sells, average_nav)` 计算 TO = Σ(|B| + |S|) / (2 × 平均资产净值)；`linear_cost_rate(TO, c)` ≈ 2 × TO × c（TO = 100%、c = 20 bp → 约 40 bp）；`net_alpha(α_gross, c_trade, c_fee)` 为同期间、同资产基数下的近似（4.00% − 1.20% − 0.60% = 2.20%），严格的净 Alpha 应对扣费后净收益序列重新回归。`capacity_check(trade_amount, adv, max_participation, days)` 逐资产计算所需参与率并标出超限资产；`cost_sensitivity(aum_grid, turnover, adv, ...)` 给出规模变化下的线性与冲击成本，冲击模型作为参数传入，默认的平方根模型 `square_root_impact(coefficient, daily_volatility)` 没有通用参数，须用成交记录校准。
+
+`evaluate(..., costs={"turnover": 1.0, "unit_cost": 0.002, "other_fees": 0.006})` 增加“成本与容量”一节并在结论中写出近似净 Alpha；可选 `trade_cost`、`gross_alpha` 与 `capacity`。费用口径为“费用后净值”（默认）时，报告注明公募基金净值通常已扣除管理费与交易成本，净 Alpha 即回归 Alpha，不重复扣减。
 
 ### Python 示例
 
@@ -162,6 +186,22 @@ res.weights; res.r_squared; res.annualized_residual_mean(12)  # 残差均值 × 
 rolling_style(df.portfolio, styles, window=36).weights       # 按窗口末期排列
 report = evaluate(df, periods_per_year=12, style_returns=styles.assign(cash=df.risk_free), style_window=36)
 report.robustness.summary()  # 剔除异常期的敏感性分析
+
+from fundeval.attribution import factor_decomposition, index_proxy_factors
+factors = index_proxy_factors(indices, df.risk_free)  # indices：含 H00300、H00852、H00919、H00918 列的单期收益表
+fd = factor_decomposition(df.portfolio, factors, df.risk_free, hac_lags=3, use_t=True)
+fd.table(12); fd.reconciliation(12); fd.exposure_text()
+report = evaluate(df, periods_per_year=12, factor_returns=factors, costs={"turnover": 1.0, "unit_cost": 0.002})
+
+from fundeval.attribution.campisi import campisi, campisi_active
+campisi_active(
+    dict(income=0.0060, duration=5.0, delta_yield=-0.0010, spread_duration=3.0, delta_spread=-0.0005, total_return=0.0120),
+    dict(income=0.0055, duration=3.0, delta_yield=-0.0010, spread_duration=1.0, delta_spread=-0.0010, total_return=0.0080),
+).table()  # 主动 0.40 个百分点 = 收入 0.05 + 利率 0.20 + 利差 0.05 + 剩余 0.10
+
+from fundeval import costs
+costs.linear_cost_rate(1.0, 0.0020)  # 0.004
+costs.net_alpha(0.04, 0.012, 0.006)  # 0.022
 
 from fundeval.etl.sources import akshare as aks  # 需 pip install "fundeval[data]"
 from fundeval.etl.benchmark import benchmark_return_type, total_return_code

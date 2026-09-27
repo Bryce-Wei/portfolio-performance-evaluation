@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from fundeval.attribution.factor import PROXY_CAVEAT
 from fundeval.report.summary import SECTIONS, STYLE_CAVEAT, EvaluationReport, conclusion, format_value
 
 
@@ -49,6 +50,37 @@ def _robustness_display(report: EvaluationReport) -> pd.DataFrame:
     return out
 
 
+def _factor_display(report: EvaluationReport) -> pd.DataFrame:
+    tbl = report.factor_table()
+    if tbl.empty:
+        return tbl
+    out = tbl.copy()
+    out["系数"] = out["系数"].map(lambda v: f"{v:.4f}")
+    for col in ("t", "p"):
+        out[col] = out[col].map(lambda v: f"{v:.4f}")
+    for col in ("因子均值（每期）", "贡献（每期）", "贡献（算术年化）"):
+        out[col] = out[col].map(lambda v: f"{v * 100:.4f}%")
+    return out
+
+
+def _factor_reconciliation_display(report: EvaluationReport) -> pd.DataFrame:
+    rec = report.factor_reconciliation()
+    out = rec.apply(lambda col: col.map(lambda v: f"{v * 100:.4f}%"))
+    return out.rename_axis("项目").reset_index()
+
+
+def _capacity_display(report: EvaluationReport) -> pd.DataFrame:
+    cap = report.capacity_table()
+    if cap.empty:
+        return cap
+    out = cap.copy()
+    for col in ("交易金额", "日均成交额"):
+        out[col] = out[col].map(lambda v: f"{v:,.0f}")
+    out["所需参与率"] = out["所需参与率"].map(lambda v: "不适用" if pd.isna(v) else f"{v * 100:.2f}%")
+    out["上限"] = out["上限"].map(lambda v: f"{v * 100:.2f}%")
+    return out.rename_axis("资产").reset_index()
+
+
 def _rolling_style_display(report: EvaluationReport) -> pd.DataFrame:
     roll = report.style_rolling
     out = roll.weights.apply(lambda col: col.map(lambda v: f"{v * 100:.1f}%"))  # DataFrame.map 需 pandas 2.1
@@ -58,8 +90,8 @@ def _rolling_style_display(report: EvaluationReport) -> pd.DataFrame:
 
 
 def to_markdown(report: EvaluationReport, path: str | Path | None = None) -> str:
-    """生成 Markdown 报告：标题、口径、各维度指标表（含收益来源）、回归系数表、滚动风格权重、
-    稳健性检验、数据质量、结论与未完成检验。
+    """生成 Markdown 报告：标题、口径、各维度指标表（含收益来源、成本与容量）、回归系数表、
+    多因子暴露与贡献、容量检查、滚动风格权重、稳健性检验、数据质量、结论与未完成检验。
 
     ``path`` 给出时同时写入文件（UTF-8）。返回 Markdown 文本。
     回归系数为每期值（与输入收益同频），未换算为百分数。
@@ -73,6 +105,17 @@ def to_markdown(report: EvaluationReport, path: str | Path | None = None) -> str
     reg = _regression_display(report)
     if not reg.empty:
         parts += ["", "## 回归系数", "", "系数为每期值，与输入收益同频。", "", _md_table(reg)]
+    if report.factor is not None:
+        intro = "贡献 = 因子系数 × 因子均值，算术年化乘以 K；各因子贡献、Alpha 与残差之和等于组合平均超额收益。"
+        if report.factor.index_proxy:
+            intro += f"{PROXY_CAVEAT}。"
+        parts += [
+            "", "## 多因子暴露与贡献", "", intro, "", _md_table(_factor_display(report)),
+            "", "收益对账：", "", _md_table(_factor_reconciliation_display(report)),
+        ]
+    if report.capacity is not None:
+        parts += ["", "## 容量检查", "", "所需参与率 = 交易金额 / (日均成交额 × 可用天数)。", "",
+                  _md_table(_capacity_display(report))]
     if report.style_rolling is not None:
         parts += [
             "", f"## 滚动风格权重（窗口 {report.style_rolling.window} 期）", "",
@@ -124,7 +167,10 @@ def _style_sheet(report: EvaluationReport, writer) -> None:
 
 
 def to_excel(report: EvaluationReport, path: str | Path) -> Path:
-    """写入 Excel（openpyxl），分 sheet：口径、指标、回归、稳健性、风格分析、期间收益、数据质量。
+    """写入 Excel（openpyxl），分 sheet：口径、指标、回归、多因子、稳健性、风格分析、成本与容量、期间收益、数据质量。
+
+    多因子 sheet 为因子暴露表，其下为收益对账（每期与算术年化）；成本与容量 sheet 为容量检查表
+    （给出 costs['capacity'] 时）。
 
     风格分析 sheet 先列全样本权重、R² 与残差统计，其下为滚动权重（给出 style_window 时）；
     稳健性 sheet 为剔除异常期前后的关键系数与说明。
@@ -158,6 +204,16 @@ def to_excel(report: EvaluationReport, path: str | Path) -> Path:
         scope.to_excel(writer, sheet_name="口径", index=False)
         metrics.to_excel(writer, sheet_name="指标", index=False)
         regression.to_excel(writer, sheet_name="回归", index=False)
+        if report.factor is not None:
+            ftbl = report.factor_table()
+            ftbl.to_excel(writer, sheet_name="多因子", index=False)
+            report.factor_reconciliation().rename_axis("项目").to_excel(
+                writer, sheet_name="多因子", startrow=len(ftbl) + 2
+            )
+            if report.factor.index_proxy:
+                pd.DataFrame({"说明": [PROXY_CAVEAT]}).to_excel(
+                    writer, sheet_name="多因子", index=False, startrow=len(ftbl) + len(report.factor_reconciliation()) + 5
+                )
         if report.robustness is not None:
             pd.DataFrame({"说明": [report.robustness.summary()]}).to_excel(writer, sheet_name="稳健性", index=False)
             rob = report.robustness_table()
@@ -165,6 +221,8 @@ def to_excel(report: EvaluationReport, path: str | Path) -> Path:
                 rob.to_excel(writer, sheet_name="稳健性", index=False, startrow=3)
         if report.style is not None:
             _style_sheet(report, writer)
+        if report.capacity is not None:
+            report.capacity.rename_axis("资产").to_excel(writer, sheet_name="成本与容量")
         data.to_excel(writer, sheet_name="期间收益")
         quality.to_excel(writer, sheet_name="数据质量", index=False)
         issues.to_excel(writer, sheet_name="数据质量", index=False, startrow=len(quality) + 2)
