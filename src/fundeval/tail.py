@@ -4,7 +4,7 @@
 - Calmar：年化几何收益与最大回撤之比
 - 历史模拟 VaR 与 ES：损失 L = -r，以正数报告
 
-口径：下行偏差分母为全样本期数 n，高于 MAR 的偏差按零计入；Sortino 的分子为
+口径：所有函数先去除收益中的 NaN 再计算。下行偏差分母为全样本期数 n，高于 MAR 的偏差按零计入；Sortino 的分子为
 同频算术均值，乘以 √K 年化。比率分母为零时返回 NaN，不报告无穷大。
 """
 
@@ -13,15 +13,25 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 
 from fundeval._utils import ZERO_TOL, as_series, broadcast_like, safe_div
 from fundeval.returns import annualized_return
 from fundeval.risk import max_drawdown
 
 
-def _below_mar(returns, mar):
-    r = as_series(returns)
-    return r - broadcast_like(mar, r)
+def _below_mar(returns, mar) -> pd.Series:
+    """r_t - MAR_t，先去除收益中的 NaN，再按去除后的索引对齐 MAR。
+
+    MAR 为 Series 时按索引对齐到保留下来的观测期；为列表或数组时须与原始收益同长，
+    按位置配对后随收益一起去除缺失期。
+    """
+    r_all = as_series(returns)
+    keep = r_all.notna()
+    if np.isscalar(mar) or isinstance(mar, pd.Series):
+        r = r_all[keep]
+        return r - broadcast_like(mar, r)
+    return (r_all - broadcast_like(mar, r_all))[keep]
 
 
 def downside_deviation(returns, mar=0.0) -> float:
@@ -29,6 +39,8 @@ def downside_deviation(returns, mar=0.0) -> float:
 
     MAR 为同频最低可接受收益，须事前指定，可为常数或同期序列。
     分母是全样本期数 n，而不是低于 MAR 的期数。
+    缺失值处理与 VaR、ES 一致：先去除收益中的 NaN，n 为去除后的期数；
+    MAR 为 Series 时按去除后的索引对齐（缺失期的 MAR 不参与计算）。
     """
     d = _below_mar(returns, mar)
     if len(d) == 0:
@@ -38,7 +50,10 @@ def downside_deviation(returns, mar=0.0) -> float:
 
 
 def sortino_ratio(returns, mar=0.0, periods_per_year: int = 12) -> float:
-    """年化 Sortino = mean(r - MAR) / DD × √K。样本内没有低于 MAR 的收益时返回 NaN。"""
+    """年化 Sortino = mean(r - MAR) / DD × √K。样本内没有低于 MAR 的收益时返回 NaN。
+
+    与 downside_deviation 相同，先去除收益中的 NaN，分子均值与下行偏差使用同一批观测期。
+    """
     d = _below_mar(returns, mar)
     return safe_div(float(d.mean()), downside_deviation(returns, mar)) * np.sqrt(periods_per_year)
 

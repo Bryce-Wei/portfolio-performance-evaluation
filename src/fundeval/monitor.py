@@ -30,11 +30,13 @@ def _usable_denominator(den: float) -> bool:
 
 
 def realized_tracking_error(
-    active, window: int | Sequence[int] = 20, periods_per_year: int = 252
+    active, window: int | Sequence[int], periods_per_year: int
 ) -> pd.Series | pd.DataFrame:
     """滚动窗口实现跟踪误差，年化：TE_t = s(a_{t-w+1..t}) × √K。
 
-    ``active`` 为日度主动收益 a_t；标准差使用样本口径（n-1），与 risk.tracking_error 一致。
+    ``periods_per_year`` 必须显式给出（日度 252、周度 52、月度 12），不设默认值，
+    避免月度数据被误按日度年化；``window`` 以期数计，同样须按数据频率选择。
+    ``active`` 为主动收益 a_t；标准差使用样本口径（n-1），与 risk.tracking_error 一致。
     ``window`` 为单个窗口时返回 Series；给出多个窗口（如 ``(20, 60)``）时返回
     以 ``te_20``、``te_60`` 为列的 DataFrame。前 w-1 期数据不足，结果为 NaN。
     短窗口噪声较大；事后实现 TE 与模型预测 TE 应分别保留，不能互相替代。
