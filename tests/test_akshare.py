@@ -303,7 +303,8 @@ def skip_if_unreachable(what: str):
 @pytest.mark.network
 def test_network_fund(net_kw):
     """基金净值与分红（东方财富 fund_open_fund_info_em）。"""
-    r, check = aks.fund_returns("110011", NET_START, NET_END, return_check=True, **net_kw)
+    with skip_if_unreachable("基金 110011 净值（东方财富 fund_open_fund_info_em）"):
+        r, check = aks.fund_returns("110011", NET_START, NET_END, return_check=True, **net_kw)
     assert len(r) > 40 and check["flagged"].mean() < 0.05
 
 
@@ -322,7 +323,8 @@ def test_network_index_eastmoney(net_kw):
 def test_network_index_csindex(net_kw):
     """中证指数官网 stock_zh_index_hist_csindex：全收益指数 H00300 与中证全债 H11001。"""
     for code in ("H00300", "H11001"):
-        r = aks.index_returns(code, NET_START, NET_END, source="csindex", **net_kw)
+        with skip_if_unreachable(f"中证指数官网 stock_zh_index_hist_csindex（{code}）"):
+            r = aks.index_returns(code, NET_START, NET_END, source="csindex", **net_kw)
         assert len(r) > 40 and r.attrs["source"] == "csindex", code
 
 
@@ -353,7 +355,8 @@ def test_network_shibor(net_kw):
 def test_network_government_bond(net_kw):
     """中国国债收益率（bond_zh_us_rate）：2 年期（自动切换的备选）与 10 年期。"""
     for source in ("cgb2y", "cgb10y"):
-        rf = aks.risk_free_returns(NET_START, NET_END, "M", source=source, **net_kw)
+        with skip_if_unreachable(f"国债收益率 bond_zh_us_rate（{source}）"):
+            rf = aks.risk_free_returns(NET_START, NET_END, "M", source=source, **net_kw)
         assert rf.notna().all() and rf.attrs["source"] == source, source
 
 
@@ -365,9 +368,12 @@ def test_network_total_return_benchmark_removes_dividend_alpha(tmp_path):
 
     kw = {"cache_dir": tmp_path}
     start, end = "2021-01-01", "2025-12-31"
-    fund = aks.fund_returns("110020", start, end, freq="M", **kw)
-    bench = aks.index_returns("H00300", start, end, freq="M", **kw)
-    rf = aks.risk_free_returns(start, end, "M", source="auto", index=fund.index, **kw)
+    with skip_if_unreachable("基金 110020 净值（东方财富 fund_open_fund_info_em）"):
+        fund = aks.fund_returns("110020", start, end, freq="M", **kw)
+    with skip_if_unreachable("中证指数官网 stock_zh_index_hist_csindex（H00300）"):
+        bench = aks.index_returns("H00300", start, end, freq="M", **kw)
+    with skip_if_unreachable("无风险利率（Shibor 3M / 国债 2 年）"):
+        rf = aks.risk_free_returns(start, end, "M", source="auto", index=fund.index, **kw)
     rep = evaluate(fund, bench, rf, periods_per_year=12)
     assert rep.n >= 55
     assert abs(rep.capm.annualized_alpha(12)) < 0.01
@@ -409,11 +415,13 @@ def test_network_style_indices_csindex(net_kw):
     kw = dict(freq="A", source="csindex", **net_kw)
     for price_code, (price_ret, total_ret) in expected.items():
         total_code = bm.total_return_code(price_code)
-        price = aks.index_returns(price_code, "2024-01-01", "2024-12-31", **kw)
-        total = aks.index_returns(total_code, "2024-01-01", "2024-12-31", **kw)
+        with skip_if_unreachable(f"中证指数官网 stock_zh_index_hist_csindex（{price_code} / {total_code}）"):
+            price = aks.index_returns(price_code, "2024-01-01", "2024-12-31", **kw)
+            total = aks.index_returns(total_code, "2024-01-01", "2024-12-31", **kw)
         assert float(price.iloc[-1]) == pytest.approx(price_ret, abs=0.002), price_code
         assert float(total.iloc[-1]) == pytest.approx(total_ret, abs=0.002), total_code
-    r = aks.index_returns("932000", NET_START, NET_END, source="csindex", **net_kw)
+    with skip_if_unreachable("中证指数官网 stock_zh_index_hist_csindex（932000）"):
+        r = aks.index_returns("932000", NET_START, NET_END, source="csindex", **net_kw)
     assert len(r) > 40
 
 
@@ -430,9 +438,12 @@ def test_network_timing_gamma_sensitive_to_2024_09(tmp_path):
 
     kw = {"cache_dir": tmp_path}
     start, end = "2021-01-01", "2025-12-31"
-    fund = aks.fund_returns("110020", start, end, freq="M", **kw)
-    bench = aks.index_returns("H00300", start, end, freq="M", **kw)
-    rf = aks.risk_free_returns(start, end, "M", source="auto", index=fund.index, **kw)
+    with skip_if_unreachable("基金 110020 净值（东方财富 fund_open_fund_info_em）"):
+        fund = aks.fund_returns("110020", start, end, freq="M", **kw)
+    with skip_if_unreachable("中证指数官网 stock_zh_index_hist_csindex（H00300）"):
+        bench = aks.index_returns("H00300", start, end, freq="M", **kw)
+    with skip_if_unreachable("无风险利率（Shibor 3M / 国债 2 年）"):
+        rf = aks.risk_free_returns(start, end, "M", source="auto", index=fund.index, **kw)
     idx = fund.index.intersection(bench.index)
     fund, bench, rf = fund[idx], bench[idx], rf.reindex(idx)
     sep = idx[idx.to_period("M") == pd.Period("2024-09", "M")]
@@ -552,3 +563,22 @@ def test_network_contract_report_110020(tmp_path):
     assert 0 < rep.metric("tracking_error") < 0.05
     text = to_markdown(rep)
     assert "合同业绩比较基准" in text and "## 基准解析" in text and "年化跟踪偏离" in text
+
+
+def test_network_timing_test_skips_when_fund_fetch_times_out(monkeypatch, tmp_path):
+    """离线核对：110020 净值取数在重试后仍读超时（本地实测 fundf10.eastmoney.com 读超时）时，
+    择时 γ 的联网测试 skip 而不是失败。"""
+    import requests
+
+    def timeout(*args, **kwargs):
+        raise requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)")
+
+    fake = FakeAkshare()
+    monkeypatch.setattr(fake, "fund_open_fund_info_em", timeout)
+    monkeypatch.setattr(aks, "_ak", lambda: fake)
+    monkeypatch.setattr(aks, "_sleep", lambda s: None)
+    monkeypatch.setitem(sys.modules, "akshare", sys.modules.get("akshare") or object())
+    with pytest.raises(pytest.skip.Exception, match="基金 110020 净值.*无法连接或超时.*ReadTimeout"):
+        test_network_timing_gamma_sensitive_to_2024_09(tmp_path)
+    with pytest.raises(pytest.skip.Exception, match="基金 110020 净值.*无法连接或超时"):
+        test_network_total_return_benchmark_removes_dividend_alpha(tmp_path)

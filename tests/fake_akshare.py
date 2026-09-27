@@ -83,6 +83,10 @@ class FakeAkshare(types.SimpleNamespace):
         self._log("index_csindex_all")
         return pd.read_csv(DATA / "index_csindex_all.csv", dtype={"指数代码": str})
 
+    def currency_boc_safe(self):
+        self._log("currency_boc_safe")
+        return pd.read_csv(DATA / "currency_boc_safe.csv")
+
     def rate_interbank(self, market="上海银行同业拆借市场", symbol="Shibor人民币", indicator="隔夜"):
         self._log("rate_interbank", market=market, symbol=symbol, indicator=indicator)
         return pd.read_csv(DATA / f"rate_interbank_{symbol}_{indicator}.csv")

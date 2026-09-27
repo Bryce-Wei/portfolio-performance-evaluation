@@ -22,6 +22,7 @@
 | `stock_zh_index_hist_csindex_H11164.csv`、`_H30355.csv` | 中证香港300、中证800成长的收盘价，由 H00300 的日收益乘系数加扰动构造，不是真实行情 |
 | `bond_composite_index_cbond_全价_总值.csv` | `bond_composite_index_cbond(indicator="全价", period="总值")`，由财富指数样本缩放构造 |
 | `bond_composite_index_cbond_财富_总值.csv` | `bond_composite_index_cbond(indicator="财富", period="总值")` |
+| `currency_boc_safe.csv` | `currency_boc_safe()`：日期与 9 个币种列（美元、欧元、日元、港元、英镑、澳元、新西兰元、新加坡元、瑞士法郎，数值为每 100 外币折合人民币元）。列名与单位按真实返回（真实表共 26 列）；港元 2021-01-04 的 84.363 与 2025-12-31 的 90.322 为真实值，其余数值为构造（2023-10 至 2024-03 的工作日，内地国庆、元旦、春节休市日不发布；新西兰元前 3 个发布日留空） |
 | `rate_interbank_Shibor人民币_3月.csv` | `rate_interbank(market="上海银行同业拆借市场", symbol="Shibor人民币", indicator="3月")` |
 | `bond_zh_us_rate.csv` | `bond_zh_us_rate(start_date=...)` |
 

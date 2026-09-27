@@ -28,6 +28,11 @@ CSV / Excel（走 etl.sources.files），不依赖网络。
 ``--style cn_equity``（或逗号分隔的代码列表，``cash`` 表示无风险收益）在报告“收益来源”一节做
 Sharpe 风格分析，``--style-window 36`` 另附滚动权重；风格指数默认用全收益代码。
 
+合同基准中的非人民币成分（如中证香港300，港元）默认 ``--fx convert``：按国家外汇管理局人民币汇率中间价
+先在日度上换算为人民币收益再合成（etl.fx），汇率取数失败时报错并提示 ``--fx none``。``--style auto`` 按基金类型
+选择风格预设；``--charts`` 生成 PNG 图表（report.charts，需 ``fundeval[plot]``）。中债成分取数失败时，
+错误信息提示可用 ``--benchmark-map`` 指定中证官网可取的债券指数替代（不自动替换）。
+
 ``--factors cn_index_proxy`` 在“Alpha 质量”一节做多因子分解（attribution.factor）：MKT = H00300 − 无风险收益，
 SMB = H00852 − H00300，HML = H00919 − H00918，均取中证指数官网全收益指数；这是指数代理因子，
 与 Fama–French 分组构造不同。多因子回归沿用 ``--hac-lags`` 与 ``--use-t``。
@@ -43,6 +48,7 @@ from pathlib import Path
 
 from fundeval.attribution.factor import FACTOR_PRESETS
 from fundeval.etl import schema
+from fundeval.etl.fx import FX_CONVERT, FX_MODES
 from fundeval.etl.benchmark import DEMAND_DEPOSIT_RATE, DEPOSIT_RATE_SOURCE, STYLE_PRESETS, TIME_DEPOSIT_RATE
 from fundeval.etl.quality import CROSS_CHECK_TOLERANCE
 from fundeval.etl.sources.akshare import DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT
@@ -62,8 +68,21 @@ from fundeval.report.summary import DEFAULT_FEE_BASIS
 NETWORK_HINT = "可改用 --index-source csindex（中证指数官网）、常数无风险利率 --rf 0.018，稍后重试，或加 --refresh 重新拉取缓存"
 
 
+def _check_charts(args) -> None:
+    """--charts 须与 --out 一起使用（图片要存到报告旁的目录）；未安装 matplotlib 时提前给出安装提示。"""
+    if not getattr(args, "charts", False):
+        return
+    if args.out is None:
+        raise ValueError("--charts 须与 --out 一起使用（图片保存到报告旁的“<报告名>_files/”目录或 Excel 的“图表”sheet）")
+    from fundeval.report.charts import require_matplotlib
+
+    require_matplotlib()
+
+
 def cmd_report(args) -> int:
     from fundeval.etl.sources import akshare as aks
+
+    _check_charts(args)
 
     with aks.collect_notes() as source_notes:
         inputs = build_report_inputs(ReportOptions.from_namespace(args))
@@ -75,9 +94,9 @@ def cmd_report(args) -> int:
         return 0
     suffix = Path(out).suffix.lower()
     if suffix in {".xlsx", ".xlsm"}:
-        to_excel(report, out)
+        to_excel(report, out, charts=args.charts)
     elif suffix in {".md", ".markdown", ".txt"}:
-        to_markdown(report, out)
+        to_markdown(report, out, charts=args.charts)
     else:
         raise ValueError(f"--out 只支持 .md 或 .xlsx，收到 {out!r}")
     print(f"报告已写入 {out}", file=sys.stderr)
@@ -85,6 +104,7 @@ def cmd_report(args) -> int:
 
 
 def cmd_compare(args) -> int:
+    _check_charts(args)
     codes = [c.strip() for c in args.funds.replace("，", ",").split(",") if c.strip()]
     opts = ReportOptions.from_namespace(args, fund=None, input=None)
     result = compare(codes, args.start, args.end, freq=args.freq, benchmark=args.benchmark or "contract",
@@ -95,9 +115,9 @@ def cmd_compare(args) -> int:
         return 0
     suffix = Path(out).suffix.lower()
     if suffix in {".xlsx", ".xlsm"}:
-        result.to_excel(out)
+        result.to_excel(out, charts=args.charts)
     elif suffix in {".md", ".markdown", ".txt"}:
-        result.to_markdown(out)
+        result.to_markdown(out, charts=args.charts)
     else:
         raise ValueError(f"--out 只支持 .md 或 .xlsx，收到 {out!r}")
     print(f"对比表已写入 {out}（成功 {len(result.reports)} 只，失败 {len(result.failures)} 只）", file=sys.stderr)
@@ -136,6 +156,11 @@ def _add_benchmark_args(p: argparse.ArgumentParser, *, compare_mode: bool = Fals
         "--index-source", choices=("auto", "em", "csindex"), default="auto",
         help="指数数据源：auto（默认，东方财富失败时改用中证指数官网）、em、csindex",
     )
+    p.add_argument(
+        "--fx", choices=FX_MODES, default=FX_CONVERT,
+        help="非人民币基准成分：convert（默认，按国家外汇管理局人民币汇率中间价换算为人民币收益，汇率取数失败时报错）"
+        "或 none（不换算，口径注明“未做汇率换算”）",
+    )
 
 
 def _add_common_args(p: argparse.ArgumentParser) -> None:
@@ -150,7 +175,8 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--style",
-        help="风格分析：预设名（" + "、".join(STYLE_PRESETS) + "）或逗号分隔的指数代码，cash 表示无风险收益；"
+        help="风格分析：auto（按基金类型选择：偏股、股票 → cn_equity；偏债、债券、FOF、混合 → cn_balanced；"
+        "无法判断时 cn_balanced）、预设名（" + "、".join(STYLE_PRESETS) + "）或逗号分隔的指数代码，cash 表示无风险收益；"
         "指数按 --index-return-type 默认换成全收益代码",
     )
     p.add_argument(
@@ -165,6 +191,11 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--tolerance", type=float, default=CROSS_CHECK_TOLERANCE,
         help=f"净值与日增长率交叉核对容差（默认 {CROSS_CHECK_TOLERANCE}，即 {CROSS_CHECK_TOLERANCE * 1e4:.0f} 个基点）",
+    )
+    p.add_argument(
+        "--charts", action="store_true",
+        help="生成 PNG 图表（需 pip install \"fundeval[plot]\"）：Markdown 存到“<报告名>_files/”并用相对路径嵌入，"
+        "Excel 另加“图表”sheet；须与 --out 一起使用",
     )
     p.add_argument("--fees", default=DEFAULT_FEE_BASIS, help=f"费用口径说明（默认“{DEFAULT_FEE_BASIS}”）")
     p.add_argument("--cache-dir", help="akshare 原始数据缓存目录（默认 ~/.fundeval/cache）")

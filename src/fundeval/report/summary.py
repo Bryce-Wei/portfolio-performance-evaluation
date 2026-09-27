@@ -379,7 +379,7 @@ def _cost_block(spec: Mapping[str, Any], alpha_annual: float, alpha_name: str, f
 #: QDII 基金的提示（正文第一部分“基准选择”）
 QDII_NOTE = (
     "QDII 基金投资境外市场，净值受人民币汇率与境外市场（交易时段、节假日、估值时点）影响，"
-    "与境内基准逐期比较时可能错期；合同基准含非人民币成分时本报告未做汇率换算"
+    "与境内基准逐期比较时可能错期；基准中非人民币成分是否做了汇率换算见口径“基准币种”"
 )
 
 
@@ -461,7 +461,8 @@ def evaluate(
     monitor_targets : {"target_active_return": 年化目标主动收益, "target_te": 年化目标 TE,
         "window": 窗口期数}，给出时计算风险倍数、z 值与分区（阈值为正文演示值）
     labels : {"title", "portfolio", "benchmark", "market", "risk_free", "fees", "benchmark_note",
-        "benchmark_return_type", "benchmark_source"}，用于口径说明；fees 缺省为“费用后净值”；
+        "benchmark_return_type", "benchmark_source", "benchmark_currency", "style", "style_preset"}，用于口径说明
+        （style_preset 为 --style auto 的预设与选择依据）；fees 缺省为“费用后净值”；
         benchmark_return_type 为“全收益”“价格指数”“含价格指数成分”或“未知”
         （见 etl.benchmark.benchmark_return_type），后三者会在口径、附注与结论中写明
         “价格指数不含成分股分红，超额收益与 Alpha 会高估约为股息率的幅度”
@@ -794,6 +795,8 @@ def evaluate(
     if "benchmark_note" in labels:
         scope["基准说明"] = labels["benchmark_note"]
     if style is not None:
+        if "style_preset" in labels:
+            scope["风格预设"] = labels["style_preset"]
         scope["风格指数"] = labels.get("style", "、".join(map(str, style.weights.index)))
         if "style_source" in labels:
             scope["风格指数数据源"] = labels["style_source"]

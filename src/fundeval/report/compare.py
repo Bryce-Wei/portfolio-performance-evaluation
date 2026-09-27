@@ -130,9 +130,21 @@ class ComparisonReport:
             frames.append(sec)
         return pd.concat(frames, ignore_index=True)
 
-    def to_markdown(self, path: str | Path | None = None) -> str:
-        """Markdown：口径、对比表、表下说明、附注与失败原因。"""
-        from fundeval.report.export import _md_table
+    def to_markdown(self, path: str | Path | None = None, *, charts: bool = False) -> str:
+        """Markdown：口径、对比表、表下说明、附注与失败原因。
+
+        ``charts=True`` 时（需 ``fundeval[plot]`` 与 ``path``）把多基金财富指数图保存到“<报告名>_files/”，
+        在“图表”一节用相对路径嵌入。
+        """
+        from fundeval.report.export import _md_table, charts_dir, markdown_images
+
+        if charts and path is None:
+            raise ValueError("charts=True 须给出 path：图片保存到报告旁的“<报告名>_files/”目录")
+        chart_lines: list[str] = []
+        if charts:
+            from fundeval.report.charts import comparison_charts
+
+            chart_lines = markdown_images(comparison_charts(self, charts_dir(path)), path)
 
         parts = [
             "# 基金横向对比", "", "## 口径", "",
@@ -140,6 +152,8 @@ class ComparisonReport:
             "", "## 对比表", "", _md_table(self.display_table()), "",
             *[f"- {n}" for n in self.footnotes()],
         ]
+        if chart_lines:
+            parts += ["", "## 图表", "", *chart_lines]
         if self.failures:
             parts += ["", "## 失败原因", "", *[f"- {code}：{reason}" for code, reason in self.failures.items()]]
         if self.notes:
@@ -149,10 +163,24 @@ class ComparisonReport:
             Path(path).write_text(text, encoding="utf-8")
         return text
 
-    def to_excel(self, path: str | Path) -> Path:
+    def to_excel(self, path: str | Path, *, charts: bool = False) -> Path:
         """Excel：“对比”sheet 为对比表（原始数值）及表下说明；每只基金一个 sheet（关键指标，失败时为失败原因）；
-        另有“失败原因”与“口径”sheet。"""
+        另有“失败原因”与“口径”sheet。``charts=True`` 时另加“图表”sheet（多基金财富指数图，需 ``fundeval[plot]``）。"""
+        import tempfile
+
         path = Path(path)
+        with tempfile.TemporaryDirectory() as tmp:
+            chart_set = None
+            if charts:
+                from fundeval.report.charts import comparison_charts
+
+                chart_set = comparison_charts(self, tmp)
+            self._write_excel(path, chart_set)
+        return path
+
+    def _write_excel(self, path: Path, chart_set) -> None:
+        from fundeval.report.export import insert_chart_sheet
+
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             self.table.to_excel(writer, sheet_name="对比", index=False)
             notes = pd.DataFrame({"说明": self.footnotes()})
@@ -163,11 +191,12 @@ class ComparisonReport:
             pd.DataFrame(
                 [(c, r) for c, r in self.failures.items()], columns=["基金代码", "失败原因"]
             ).to_excel(writer, sheet_name="失败原因", index=False)
-        return path
+            if chart_set is not None:
+                insert_chart_sheet(writer.book, chart_set)
 
 
 def _row(code: str, rep: EvaluationReport | None, profile, error: str | None, k: int, *, factors: bool,
-         style: bool, treynor: bool) -> dict[str, Any]:
+         style: bool, treynor: bool, style_auto: bool = False) -> dict[str, Any]:
     nan = float("nan")
     row: dict[str, Any] = {
         "基金代码": code,
@@ -195,6 +224,8 @@ def _row(code: str, rep: EvaluationReport | None, profile, error: str | None, k:
         row["Treynor"] = _metric(rep, "treynor") if rep is not None else nan
         row["β"] = _metric(rep, "beta") if rep is not None else nan
     if style:
+        if style_auto:
+            row["风格预设"] = (rep.labels.get("style_preset", "") if rep is not None else "")
         row["风格前两项"] = (
             "；".join(f"{name} {w:.1%}" for name, w in rep.style.top(2).items())
             if rep is not None and rep.style is not None else ""
@@ -314,7 +345,7 @@ def compare(
         if profile is not None:
             profiles[code] = profile
         rows.append(_row(code, rep, profile, error, k, factors=bool(opts.factors), style=bool(opts.style),
-                         treynor=sort == "treynor"))
+                         treynor=sort == "treynor", style_auto=bool(opts.style) and opts.style.strip().lower() == "auto"))
     table = pd.DataFrame(rows)
     if sort is not None:
         table = _sort(table, sort)
@@ -328,8 +359,12 @@ def compare(
     }
     if opts.factors:
         scope["因子"] = opts.factors
+    scope["汇率换算"] = (
+        "convert：非人民币基准成分按国家外汇管理局人民币汇率中间价换算为人民币收益" if opts.fx == "convert"
+        else "none：未做汇率换算，基准收益含汇率差异"
+    )
     if opts.style:
-        scope["风格指数"] = opts.style
+        scope["风格指数"] = "auto（按各基金的基金类型选择预设，见“风格预设”列）" if opts.style.strip().lower() == "auto" else opts.style
     return ComparisonReport(table=table, reports=reports, failures=failures, profiles=profiles, scope=scope,
                             sort=sort, notes=notes)
 
