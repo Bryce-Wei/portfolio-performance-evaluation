@@ -97,3 +97,32 @@ def test_calmar_worked_example(worked_example):
     assert returns.annualized_return(p, K) == pytest.approx(0.102058, abs=0.5e-6)
     assert risk.max_drawdown(p) == pytest.approx(0.03, abs=1e-12)
     assert tail.calmar_ratio(p, K) == pytest.approx(3.4019, abs=0.5e-4)
+
+
+def test_downside_and_sortino_drop_nan_like_var_es():
+    idx = pd.date_range("2025-01-31", periods=5, freq="ME")
+    r = pd.Series([0.02, np.nan, -0.01, 0.03, -0.03], index=idx)
+    clean = r.dropna()
+    # 分母 n 为去除 NaN 后的 4 期，与 VaR、ES 的缺失值处理一致
+    assert tail.downside_deviation(r, 0.0) == pytest.approx(math.sqrt((0.01**2 + 0.03**2) / 4))
+    assert tail.downside_deviation(r, 0.0) == pytest.approx(tail.downside_deviation(clean, 0.0))
+    assert tail.sortino_ratio(r, 0.0, K) == pytest.approx(tail.sortino_ratio(clean, 0.0, K))
+    assert not math.isnan(tail.sortino_ratio(r, 0.0, K))
+    assert tail.historical_var(r, 0.75) == pytest.approx(tail.historical_var(clean, 0.75))
+
+
+def test_mar_series_aligns_to_index_after_dropping_nan():
+    idx = pd.date_range("2025-01-31", periods=4, freq="ME")
+    r = pd.Series([0.01, np.nan, 0.00, 0.02], index=idx)
+    # MAR 序列缺少收益为 NaN 的那一期，也不影响计算；顺序打乱后按索引对齐
+    mar = pd.Series([0.01, 0.02, 0.02], index=idx[[3, 0, 2]])
+    expected = math.sqrt((0.01**2 + 0.02**2) / 3)  # 1 月 -1%、3 月 -2%、4 月 +1%
+    assert tail.downside_deviation(r, mar) == pytest.approx(expected)
+    mean = (-0.01 - 0.02 + 0.01) / 3
+    assert tail.sortino_ratio(r, mar, K) == pytest.approx(mean / expected * math.sqrt(K))
+
+
+def test_mar_array_pairs_by_position_before_dropping_nan():
+    r = [0.01, np.nan, 0.00, 0.02]
+    mar = [0.02, 0.50, 0.02, 0.01]  # 第 2 期随收益一起去除
+    assert tail.downside_deviation(r, mar) == pytest.approx(math.sqrt((0.01**2 + 0.02**2) / 3))

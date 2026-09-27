@@ -26,23 +26,27 @@
 
 ## 代码：fundeval 工具包
 
-`src/fundeval/` 按正文章节组织。当前已实现数据准备、收益衡量、风险调整指标、持续风险监控与下行及尾部风险，其余模块将陆续加入。
+`src/fundeval/` 按正文章节组织。当前已实现数据准备、收益衡量、风险调整指标、Alpha 回归与稳健性检验、Brinson 归因、择时模型、持续风险监控与下行及尾部风险，其余模块将陆续加入。
 
 | 模块 | 对应章节 | 状态 |
 | --- | --- | --- |
 | `etl/`（schema、sources/files、clean、returns） | 一 数据准备 | 已实现（akshare、French 数据源待加入） |
 | `returns.py`（TWR、年化、MWR/XIRR、超额收益） | 二 收益衡量 | 已实现 |
 | `risk.py`（波动、回撤、Sharpe、IR、Treynor、M²） | 三 风险调整 | 已实现 |
-| `monitor.py`（滚动实现 TE、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
+| `alpha/`（regression：因子与 CAPM 回归、HAC 标准误；rolling：滚动 Alpha/Beta、滚动 IR、样本内外切分；fundamental：IR ≈ TC × IC × √BR） | 四 Alpha 来源 | 已实现 |
+| `attribution/brinson.py`（单期 BHB / BF、多期 Cariño 链接与对账） | 五 第 2 节 | 已实现 |
+| `attribution/timing.py`（Treynor–Mazuy、Henriksson–Merton） | 五 第 5 节 | 已实现 |
+| `attribution/` 风格分析（style）、多因子分解（factor）、Campisi | 五 第 1、3、4 节 | 待实现 |
+| `monitor.py`（滚动实现 TE（K 须显式给出）、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
 | `tail.py`（下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES） | 八 尾部风险 | 已实现 |
-| `alpha/`、`attribution/`、`costs.py`、`report/` | 四至六、报告 | 待实现 |
+| `costs.py`、`report/` | 六、报告 | 待实现 |
 
 ```bash
 pip install -e ".[test]"
 pytest
 ```
 
-依赖：pandas、numpy、scipy、statsmodels；可选 `excel`（openpyxl，读取 xlsx）与 `test`（pytest）。`tail.py` 与 `monitor.py` 未新增依赖。GitHub Actions（`.github/workflows/tests.yml`）在 push 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
+依赖：pandas、numpy、scipy、statsmodels；可选 `excel`（openpyxl，读取 xlsx）与 `test`（pytest）。回归（`alpha/`、`attribution/timing.py`）使用 statsmodels。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
 
 ```python
 from fundeval import risk
@@ -57,6 +61,16 @@ risk.summary(df.portfolio, df.benchmark, df.risk_free, periods_per_year=12)
 from fundeval import tail
 tail.sortino_ratio(df.portfolio, mar=df.risk_free, periods_per_year=12)  # MAR 需事前指定
 tail.historical_var(df.portfolio, confidence=0.95)
+
+from fundeval import monitor
+monitor.realized_tracking_error(df.portfolio - df.benchmark, window=6, periods_per_year=12)  # K 必须显式给出
+
+from fundeval.alpha import capm_regression
+res = capm_regression(df.portfolio, df.benchmark, df.risk_free, hac_lags=2)  # Newey–West 标准误
+res.table(); res.annualized_alpha(12)  # 算术年化 α × K
+
+from fundeval.attribution import brinson_single
+brinson_single([0.5, 0.3, 0.2], [0.4, 0.4, 0.2], [0.038, 0.01, -0.01], [0.03, 0.01, -0.005]).table()
 ```
 
 收益一律以小数表示（0.02 即 2%）。比率使用同频算术均值与样本标准差（n−1），乘以 √K 年化；分母为零时返回 NaN，表示不适用。`tests/test_worked_example.py` 用第九部分的演示数值作为基准测试。

@@ -41,7 +41,7 @@ def test_realized_te_matches_sample_std_annualized():
 
 def test_realized_te_rejects_bad_window():
     with pytest.raises(ValueError):
-        monitor.realized_tracking_error([0.01, 0.02, 0.03], 1)
+        monitor.realized_tracking_error([0.01, 0.02, 0.03], 1, K)
 
 
 def test_risk_multiple():
@@ -96,3 +96,11 @@ def test_consecutive_red():
 
 def test_worst_status():
     assert monitor.worst_status(["green", "red", "yellow"]) == "red"
+
+
+def test_realized_te_requires_periods_per_year():
+    # 不设默认的 K，避免月度数据被误按日度 252 年化
+    with pytest.raises(TypeError):
+        monitor.realized_tracking_error([0.01, 0.02, 0.03], 2)
+    monthly = monitor.realized_tracking_error([0.01, -0.01, 0.02], 3, 12)
+    assert monthly.iloc[-1] == pytest.approx(np.std([0.01, -0.01, 0.02], ddof=1) * math.sqrt(12))
