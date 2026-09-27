@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterable
 
 import numpy as np
@@ -68,17 +69,31 @@ def relative_return(portfolio, benchmark) -> float:
 
 
 def _solve_rate(npv, lower: float = -0.9999, upper: float = 10.0) -> float:
-    """在 (lower, upper) 内求净现值为零的收益率；区间内无变号时返回 NaN。"""
+    """在 (lower, upper) 内求净现值为零的收益率；区间内无变号时返回 NaN。
+
+    现金流多次变号时可能有多个根（例如 [-100, 230, -132] 的 10% 与 20%）。
+    此时发出 RuntimeWarning 列出全部根，仍返回最接近零的一个，由调用方复核现金流方向。
+    """
     grid = np.concatenate([np.linspace(lower, 0, 200, endpoint=False), np.geomspace(1e-6, upper, 200)])
     vals = np.array([npv(x) for x in grid])
-    roots = []
+    roots: list[float] = []
     for i in range(len(grid) - 1):
         if np.isfinite(vals[i]) and np.isfinite(vals[i + 1]) and vals[i] * vals[i + 1] <= 0:
-            roots.append(brentq(npv, grid[i], grid[i + 1], xtol=1e-14, maxiter=500))
+            root = float(brentq(npv, grid[i], grid[i + 1], xtol=1e-14, maxiter=500))
+            # 根恰好落在网格点上时，相邻两个区间会找到同一个根
+            if not any(abs(root - r) < 1e-9 for r in roots):
+                roots.append(root)
     if not roots:
         return float("nan")
-    # 多个根时取最接近零的一个，并由调用方复核现金流方向
-    return float(min(roots, key=abs))
+    chosen = min(roots, key=abs)
+    if len(roots) > 1:
+        listed = "、".join(f"{r:.6%}" for r in roots)
+        warnings.warn(
+            f"内部收益率有 {len(roots)} 个解：{listed}；返回最接近零的 {chosen:.6%}，请复核现金流方向",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return chosen
 
 
 def irr(cashflows: Iterable[float]) -> float:

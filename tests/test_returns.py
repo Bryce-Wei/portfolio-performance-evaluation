@@ -56,3 +56,20 @@ def test_misaligned_series_are_rejected():
     b = pd.Series([0.01, 0.02], index=pd.to_datetime(["2025-01-31", "2025-03-31"]))
     with pytest.raises(ValueError):
         returns.active_returns(a, b)
+
+
+def test_irr_multiple_roots_warns_and_returns_closest_to_zero():
+    # -100 + 230/(1+i) - 132/(1+i)^2 = 0 的两个解为 10% 与 20%
+    with pytest.warns(RuntimeWarning, match="2 个解") as record:
+        r = returns.irr([-100, 230, -132])
+    assert r == pytest.approx(0.10, abs=1e-10)
+    message = str(record[0].message)
+    assert "10.000000%" in message and "20.000000%" in message
+
+
+def test_irr_single_root_does_not_warn():
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert returns.irr([-100, -50, 144]) == pytest.approx(-0.0242, abs=0.5e-4)
