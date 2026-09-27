@@ -3,6 +3,7 @@
 供 `tests/test_akshare.py` 等用 monkeypatch 替换接口的小样本。列名、日期格式与百分数单位与接口一致，但数值大多为构造：
 
 - **来自真实返回（akshare 1.18.97，本地核实，2026-09-27）**：`分红送配详情` 的列名（年份、权益登记日、除息日、每10份分红、分红发放日）与金额写法（“每10份派现金9.0000元”，按每 10 份计）；110011 在 2021-02-25 除息、每10份派现金9.0000元；单位净值 2021-02-24 为 9.4782、2021-02-25 为 8.4677，2021-02-25 的日增长率为 −1.17%。
+- **来自真实返回（akshare 1.18.97，本地核实，2026-09-27）**：`fund_overview_em` 的 18 个列名与“成立日期/规模”“费率”“跟踪标的”的写法（如“2008年06月19日 / 12.267亿份”“该基金无跟踪标的”）；110011、110020、000001 的基金类型与业绩比较基准原文。`index_csindex_all` 的 17 个列名；000300、000918、000919、H11164（港元）、H30355、H30356、000922、932000 的指数代码、简称、全称与币种。
 - **构造**：其余所有数值（包括 2021 年分红的权益登记日与发放日、2023-11 起的净值、指数与利率），以及其他接口的列名。这些列名按 akshare 1.18.97 源码填写，未在本仓库用真实返回核对。
 
 | 文件 | 接口与参数 |
@@ -15,6 +16,11 @@
 | `stock_zh_index_hist_csindex_H00300.csv` | `stock_zh_index_hist_csindex(symbol="H00300", ...)`：沪深 300 全收益，在价格指数基础上每个交易日多约 0.8 个基点（模拟分红再投资） |
 | `stock_zh_index_hist_csindex_H00918.csv`、`_H00919.csv`、`_H00905.csv`、`_H00852.csv` | `stock_zh_index_hist_csindex(symbol=...)`：沪深300成长 / 价值、中证500、中证1000 全收益，供风格分析（`--style cn_equity`）的测试。列名与 H00300 相同，收盘价由 H00300 的日收益乘以不同系数、加固定种子的随机扰动构造，不是真实行情 |
 | `stock_zh_index_hist_csindex_000300.csv` | `stock_zh_index_hist_csindex(symbol="000300", ...)`：收盘价与 `index_zh_a_hist_000300.csv` 相同，供东方财富失败时改用中证官网的测试 |
+| `fund_overview_em_110011.csv`、`_110020.csv`、`_000001.csv` | `fund_overview_em(symbol=...)`：1 行 18 列。基金类型与业绩比较基准为真实文本；全称、简称、成立日期/规模（110011 的一行取自真实写法）、规模、管理人、托管人、基金经理、分红、费率等为构造，写法与真实返回一致 |
+| `index_csindex_all.csv` | `index_csindex_all()`：只录制上面列出的 8 行；代码、简称、全称、币种为真实，基日、点位、近一个月收益率等为构造。真实表约 2370 行，全收益指数（如 H00300）不在表中 |
+| `fund_open_fund_info_em_110020_*.csv`、`_000001_*.csv` | 110020、000001 的单位净值（由 H00300 / H30355 的构造日收益乘系数加扰动生成）与空的分红表，全部为构造 |
+| `stock_zh_index_hist_csindex_H11164.csv`、`_H30355.csv` | 中证香港300、中证800成长的收盘价，由 H00300 的日收益乘系数加扰动构造，不是真实行情 |
+| `bond_composite_index_cbond_全价_总值.csv` | `bond_composite_index_cbond(indicator="全价", period="总值")`，由财富指数样本缩放构造 |
 | `bond_composite_index_cbond_财富_总值.csv` | `bond_composite_index_cbond(indicator="财富", period="总值")` |
 | `rate_interbank_Shibor人民币_3月.csv` | `rate_interbank(market="上海银行同业拆借市场", symbol="Shibor人民币", indicator="3月")` |
 | `bond_zh_us_rate.csv` | `bond_zh_us_rate(start_date=...)` |

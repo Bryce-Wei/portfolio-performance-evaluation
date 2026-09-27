@@ -81,6 +81,12 @@ def _capacity_display(report: EvaluationReport) -> pd.DataFrame:
     return out.rename_axis("资产").reset_index()
 
 
+def _components_display(report: EvaluationReport) -> pd.DataFrame:
+    out = report.benchmark_components.copy()
+    out["权重"] = out["权重"].map(lambda v: "—" if pd.isna(v) else f"{v * 100:.0f}%")
+    return out
+
+
 def _rolling_style_display(report: EvaluationReport) -> pd.DataFrame:
     roll = report.style_rolling
     out = roll.weights.apply(lambda col: col.map(lambda v: f"{v * 100:.1f}%"))  # DataFrame.map 需 pandas 2.1
@@ -90,13 +96,16 @@ def _rolling_style_display(report: EvaluationReport) -> pd.DataFrame:
 
 
 def to_markdown(report: EvaluationReport, path: str | Path | None = None) -> str:
-    """生成 Markdown 报告：标题、口径、各维度指标表（含收益来源、成本与容量）、回归系数表、
+    """生成 Markdown 报告：标题、口径、基准解析（用合同基准时）、各维度指标表（含收益来源、成本与容量）、回归系数表、
     多因子暴露与贡献、容量检查、滚动风格权重、稳健性检验、数据质量、结论与未完成检验。
 
     ``path`` 给出时同时写入文件（UTF-8）。返回 Markdown 文本。
     回归系数为每期值（与输入收益同频），未换算为百分数。
     """
     parts = [f"# {report.title}", "", "## 口径", "", _md_table(pd.DataFrame(list(report.scope.items()), columns=["项目", "内容"]))]
+    if report.benchmark_components is not None and len(report.benchmark_components):
+        parts += ["", "## 基准解析", "", "合同业绩比较基准逐项解析；权重为合同权重，每期再平衡。", "",
+                  _md_table(_components_display(report))]
     for name in SECTIONS:
         section = report.section(name)
         if section.empty:
@@ -167,7 +176,7 @@ def _style_sheet(report: EvaluationReport, writer) -> None:
 
 
 def to_excel(report: EvaluationReport, path: str | Path) -> Path:
-    """写入 Excel（openpyxl），分 sheet：口径、指标、回归、多因子、稳健性、风格分析、成本与容量、期间收益、数据质量。
+    """写入 Excel（openpyxl），分 sheet：口径、基准解析（用合同基准时）、指标、回归、多因子、稳健性、风格分析、成本与容量、期间收益、数据质量。
 
     多因子 sheet 为因子暴露表，其下为收益对账（每期与算术年化）；成本与容量 sheet 为容量检查表
     （给出 costs['capacity'] 时）。
@@ -202,6 +211,8 @@ def to_excel(report: EvaluationReport, path: str | Path) -> Path:
     conclusion_df = pd.DataFrame({"结论": conclusion(report).split("\n\n")})
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         scope.to_excel(writer, sheet_name="口径", index=False)
+        if report.benchmark_components is not None and len(report.benchmark_components):
+            report.benchmark_components.to_excel(writer, sheet_name="基准解析", index=False)
         metrics.to_excel(writer, sheet_name="指标", index=False)
         regression.to_excel(writer, sheet_name="回归", index=False)
         if report.factor is not None:

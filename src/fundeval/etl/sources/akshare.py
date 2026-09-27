@@ -12,6 +12,11 @@ akshare 是可选依赖，按需延迟导入；未安装时报错并提示 ``pip
 - 指数：``index_zh_a_hist(symbol, period, start_date, end_date)``（东方财富，中证、国证、上证等 A 股指数），
   ``stock_zh_index_hist_csindex(symbol, start_date, end_date)``（中证指数官网，如 H11001 中证全债），
   ``bond_composite_index_cbond(indicator, period)`` 与 ``bond_new_composite_index_cbond``（中债综合 / 新综合）
+- 基金概况：``fund_overview_em(symbol)`` 返回 1 行 18 列（基金全称、基金简称、基金代码、基金类型、发行日期、
+  成立日期/规模、净资产规模、份额规模、基金管理人、基金托管人、基金经理人、成立来分红、管理费率、托管费率、
+  销售服务费率、最高认购费率、业绩比较基准、跟踪标的），已用真实返回核对（2026-09-27）
+- 指数目录：``index_csindex_all()`` 返回中证指数官网的指数全表（约 2370 行：指数代码、指数简称、指数全称、
+  指数币种等），不含全收益指数（如 H00300），已用真实返回核对（2026-09-27）
 - 利率：``rate_interbank(market, symbol, indicator)`` 返回 报告日、利率（%）、涨跌（Shibor 各期限）；
   ``bond_zh_us_rate(start_date)`` 返回 日期、中国国债收益率2年 / 5年 / 10年 / 30年（%）等
 
@@ -51,6 +56,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -105,12 +111,55 @@ INDEX_CSINDEX = {
     "date": "日期",
     "close": "收盘",
 }
+#: 中债指数：``cbond:<键>``。indicator 的取值按 akshare 1.18.97 源码核对（bond_cbond.py 的 indicator_map：
+#: "全价"、"净价"、"财富" 等；period "总值" 为全部期限），“财富”为利息再投资的全收益口径，“全价”含应计利息
+#: 但不含利息再投资，按价格指数处理。
 INDEX_CBOND = {
-    "composite": {"func": "bond_composite_index_cbond", "label": "中债-综合指数（财富）"},
-    "new_composite": {"func": "bond_new_composite_index_cbond", "label": "中债-新综合指数（财富）"},
+    "composite": {
+        "func": "bond_composite_index_cbond", "kwargs": {"indicator": "财富", "period": "总值"},
+        "label": "中债-综合指数（财富）",
+    },
+    "composite_full": {
+        "func": "bond_composite_index_cbond", "kwargs": {"indicator": "全价", "period": "总值"},
+        "label": "中债-综合指数（全价）",
+    },
+    "new_composite": {
+        "func": "bond_new_composite_index_cbond", "kwargs": {"indicator": "财富", "period": "总值"},
+        "label": "中债-新综合指数（财富）",
+    },
 }
-INDEX_CBOND_KWARGS = {"indicator": "财富", "period": "总值"}
 INDEX_CBOND_COLUMNS = {"date": "date", "value": "value"}
+
+#: 基金概况（天天基金“基本概况”页）：1 行，列名即页面上的项目名
+FUND_OVERVIEW = {
+    "func": "fund_overview_em",
+    "full_name": "基金全称",
+    "short_name": "基金简称",
+    "type": "基金类型",
+    "inception": "成立日期/规模",  # 如“2008年06月19日 / 12.267亿份”
+    "manager": "基金管理人",
+    "fund_managers": "基金经理人",
+    "management_fee": "管理费率",  # 如“1.50%（每年）”
+    "custodian_fee": "托管费率",
+    "sales_service_fee": "销售服务费率",
+    "benchmark": "业绩比较基准",
+    "tracking": "跟踪标的",  # 无跟踪标的时为“该基金无跟踪标的”
+}
+#: 跟踪标的一栏表示“没有”的写法
+NO_TRACKING_TARGET = "该基金无跟踪标的"
+
+#: 中证指数官网指数全表（不含全收益指数）
+INDEX_CATALOG = {
+    "func": "index_csindex_all",
+    "code": "指数代码",
+    "short_name": "指数简称",
+    "full_name": "指数全称",
+    "currency": "指数币种",
+}
+
+#: 基金概况与指数目录的缓存有效期
+PROFILE_MAX_AGE = pd.Timedelta(days=1)
+CATALOG_MAX_AGE = pd.Timedelta(days=7)
 
 #: 无风险利率来源。rate 列为年化百分数。
 RATE_SOURCES = {
@@ -448,9 +497,9 @@ def _as_timedelta(value) -> pd.Timedelta:
     return pd.Timedelta(days=float(value))
 
 
-def _read_cache(path: Path) -> pd.DataFrame:
+def _read_cache(path: Path, dtype=None) -> pd.DataFrame:
     try:
-        return pd.read_csv(path, encoding="utf-8")
+        return pd.read_csv(path, encoding="utf-8", dtype=dtype)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
 
@@ -473,16 +522,18 @@ def _cached_call(
     date_col: str | None = None,
     coverage_end=None,
     dated: bool = True,
+    read_dtype=None,
 ) -> pd.DataFrame:
     """按 (接口, 代码, 日期区间) 读取缓存；未命中、过期、关闭缓存或强制刷新时调用 fetch()。
 
     ``coverage_end`` 为调用方请求的截止日期，用于覆盖范围检查；``dated=False`` 表示接口不接受
     日期参数（总是返回全历史），此时另按 ``cache_max_age`` 检查缓存文件的新旧。
+    ``read_dtype`` 传给读缓存的 pandas.read_csv（如 str，保留“000001”这类代码的前导零）。
     ``timeout`` 为单个 HTTP 请求的超时秒数，``total_timeout`` 为每次尝试的总时限（见 _call_with_timeout）。
     重新拉取遇到网络类异常且已有旧缓存时回退到旧缓存，发出警告并写入附注。
     """
     path = cache_path(cache_dir, interface, code, start, end)
-    cached = _read_cache(path) if use_cache and path.exists() else None
+    cached = _read_cache(path, read_dtype) if use_cache and path.exists() else None
     reason = "指定了强制刷新"
     if cached is not None and not refresh:
         reason = _stale_reason(
@@ -514,7 +565,7 @@ def _cached_call(
 
 def _call(
     spec: dict, code: str, start, end, cache: dict, *, date_col: str | None = None, coverage_end=None,
-    dated: bool = True, **kwargs,
+    dated: bool = True, read_dtype=None, **kwargs,
 ) -> pd.DataFrame:
     fn_name = spec["func"]
     indicator = spec.get("kwargs", {}).get("indicator")
@@ -525,7 +576,8 @@ def _call(
         return _interface(fn_name)(**call_kwargs)
 
     return _cached_call(
-        interface, code, start, end, fetch, date_col=date_col, coverage_end=coverage_end, dated=dated, **cache
+        interface, code, start, end, fetch, date_col=date_col, coverage_end=coverage_end, dated=dated,
+        read_dtype=read_dtype, **cache,
     )
 
 
@@ -721,6 +773,151 @@ def fund_accumulated_nav(
 
 
 # ---------------------------------------------------------------------------
+# 基金概况与指数目录
+# ---------------------------------------------------------------------------
+
+_FEE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[%％]")
+_CN_DATE = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+
+
+def _text(value) -> str | None:
+    """概况中的单元格转为去掉首尾空白的文字；缺失或空白为 None。"""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    text = str(value).strip()
+    return text if text and text.lower() != "nan" else None
+
+
+def parse_fee_rate(value) -> float | str | None:
+    """费率文字转为小数：“1.50%（每年）”→ 0.015，“0.00%（每年）”→ 0.0。
+
+    不是“数字%”开头的写法（如“---”、分档费率说明）原样返回文字，不做猜测；缺失为 None。
+    """
+    text = _text(value)
+    if text is None:
+        return None
+    m = _FEE.match(text)
+    return float(m.group(1)) / 100 if m else text
+
+
+def parse_inception_date(value) -> pd.Timestamp | None:
+    """从“成立日期/规模”（如“2008年06月19日 / 12.267亿份”）取成立日期；无法解析时为 None。"""
+    text = _text(value)
+    if text is None:
+        return None
+    m = _CN_DATE.search(text.split("/")[0])
+    if m is None:
+        return None
+    return pd.Timestamp(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+@dataclass(frozen=True)
+class FundProfile:
+    """基金概况（天天基金“基本概况”，fund_overview_em），正文第一部分“基准选择”与第六部分“费用”的输入。
+
+    - 费率（``management_fee``、``custodian_fee``、``sales_service_fee``）为年化小数；无法解析时保留原文
+      （str），缺失为 None
+    - ``inception_date`` 从“成立日期/规模”解析，无法解析时为 None
+    - ``tracking_target``：“该基金无跟踪标的”转为 None
+    - ``raw``：原始一行（项目 → 文字）
+    """
+
+    code: str
+    full_name: str | None
+    short_name: str | None
+    fund_type: str | None
+    inception_date: pd.Timestamp | None
+    manager: str | None
+    fund_managers: str | None
+    management_fee: float | str | None
+    custodian_fee: float | str | None
+    sales_service_fee: float | str | None
+    benchmark_text: str | None
+    tracking_target: str | None
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def is_index_fund(self) -> bool:
+        """指数型基金（基金类型以“指数型”开头，或有跟踪标的）。"""
+        return bool(self.fund_type and self.fund_type.startswith("指数型")) or self.tracking_target is not None
+
+    @property
+    def is_qdii(self) -> bool:
+        """QDII 基金（基金类型以“QDII”开头）。"""
+        return bool(self.fund_type and self.fund_type.upper().startswith("QDII"))
+
+    def fees(self) -> dict[str, float | str | None]:
+        """{管理费: 费率, 托管费: 费率, 销售服务费: 费率}。"""
+        return {"管理费": self.management_fee, "托管费": self.custodian_fee, "销售服务费": self.sales_service_fee}
+
+
+def fund_profile(
+    code: str,
+    *,
+    cache_dir=None,
+    use_cache: bool = True,
+    refresh: bool = False,
+    cache_max_age=PROFILE_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
+    total_timeout: float | None = DEFAULT_TOTAL_TIMEOUT,
+) -> FundProfile:
+    """基金概况：全称、简称、类型、成立日期、管理人、基金经理、费率、合同业绩比较基准原文与跟踪标的。
+
+    取自 ``fund_overview_em(symbol)``（1 行 18 列），缓存有效期默认 1 天（PROFILE_MAX_AGE）。
+    查无此基金（返回空表）时报错。
+    """
+    spec = FUND_OVERVIEW
+    cache = _cache_opts(cache_dir, use_cache, refresh, CACHE_LAG_DAYS, cache_max_age, timeout, total_timeout)
+    raw = _call(spec, code, None, None, cache, dated=False, read_dtype=str, symbol=code)
+    if raw.empty:
+        raise ValueError(f"未取到基金 {code} 的概况（{spec['func']} 返回空表），请检查基金代码")
+    _require_columns(raw, [spec[k] for k in ("full_name", "short_name", "type", "benchmark")], spec["func"])
+    row = {str(k): _text(v) for k, v in raw.iloc[0].items()}
+    tracking = row.get(spec["tracking"])
+    return FundProfile(
+        code=code,
+        full_name=row.get(spec["full_name"]),
+        short_name=row.get(spec["short_name"]),
+        fund_type=row.get(spec["type"]),
+        inception_date=parse_inception_date(row.get(spec["inception"])),
+        manager=row.get(spec["manager"]),
+        fund_managers=row.get(spec["fund_managers"]),
+        management_fee=parse_fee_rate(row.get(spec["management_fee"])),
+        custodian_fee=parse_fee_rate(row.get(spec["custodian_fee"])),
+        sales_service_fee=parse_fee_rate(row.get(spec["sales_service_fee"])),
+        benchmark_text=row.get(spec["benchmark"]),
+        tracking_target=None if tracking in (None, NO_TRACKING_TARGET) else tracking,
+        raw=row,
+    )
+
+
+def index_catalog(
+    *,
+    cache_dir=None,
+    use_cache: bool = True,
+    refresh: bool = False,
+    cache_max_age=CATALOG_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
+    total_timeout: float | None = DEFAULT_TOTAL_TIMEOUT,
+) -> pd.DataFrame:
+    """中证指数官网的指数全表（``index_csindex_all()``），缓存有效期默认 7 天（CATALOG_MAX_AGE）。
+
+    返回原表，其中指数代码、指数简称、指数全称、指数币种转为文字（纯数字代码补足 6 位）。
+    全收益指数（如 H00300）不在该表中，全收益映射见 etl.benchmark.INDEX_RECORDS。
+    """
+    spec = INDEX_CATALOG
+    cache = _cache_opts(cache_dir, use_cache, refresh, CACHE_LAG_DAYS, cache_max_age, timeout, total_timeout)
+    raw = _call(spec, "all", None, None, cache, dated=False, read_dtype=str)
+    cols = [spec[k] for k in ("code", "short_name", "full_name", "currency")]
+    _require_columns(raw, cols, spec["func"])
+    out = raw.copy()
+    for col in cols:
+        out[col] = out[col].map(lambda v: _text(v) or "")
+    out[spec["code"]] = out[spec["code"]].map(lambda c: c.zfill(6) if c.isdigit() else c)
+    return out.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # 指数
 # ---------------------------------------------------------------------------
 
@@ -757,7 +954,7 @@ def _index_prices_from(source: str, code: str, fetch_start, end, cache: dict) ->
         key = code.removeprefix("cbond:")
         if key not in INDEX_CBOND:
             raise ValueError(f"未知中债指数 {code!r}，可选：{['cbond:' + k for k in INDEX_CBOND]}")
-        spec = {"func": INDEX_CBOND[key]["func"], "kwargs": INDEX_CBOND_KWARGS}
+        spec = {"func": INDEX_CBOND[key]["func"], "kwargs": INDEX_CBOND[key]["kwargs"]}
         raw = _call(spec, code, None, None, cache, date_col=INDEX_CBOND_COLUMNS["date"], coverage_end=end, dated=False)
         _require_columns(raw, list(INDEX_CBOND_COLUMNS.values()), spec["func"])
         return _series(raw, INDEX_CBOND_COLUMNS["date"], INDEX_CBOND_COLUMNS["value"], code)

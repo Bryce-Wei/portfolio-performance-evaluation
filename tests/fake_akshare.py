@@ -72,6 +72,17 @@ class FakeAkshare(types.SimpleNamespace):
         self._log("bond_composite_index_cbond", indicator=indicator, period=period)
         return pd.read_csv(DATA / f"bond_composite_index_cbond_{indicator}_{period}.csv")
 
+    def fund_overview_em(self, symbol="015641"):
+        self._log("fund_overview_em", symbol=symbol)
+        path = DATA / f"fund_overview_em_{symbol}.csv"
+        if not path.exists():  # 与真实接口一样：查无此基金时返回空表
+            return pd.DataFrame([])
+        return pd.read_csv(path, dtype=str)
+
+    def index_csindex_all(self):
+        self._log("index_csindex_all")
+        return pd.read_csv(DATA / "index_csindex_all.csv", dtype={"指数代码": str})
+
     def rate_interbank(self, market="上海银行同业拆借市场", symbol="Shibor人民币", indicator="隔夜"):
         self._log("rate_interbank", market=market, symbol=symbol, indicator=indicator)
         return pd.read_csv(DATA / f"rate_interbank_{symbol}_{indicator}.csv")
