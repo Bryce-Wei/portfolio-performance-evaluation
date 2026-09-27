@@ -134,3 +134,46 @@ def test_fundamental_law_article_values():
     with pytest.raises(ValueError):
         expected_ir(0.05, -1)
     assert math.isclose(expected_ir(0.0, 100), 0.0)
+
+
+def test_use_t_none_keeps_defaults():
+    r, f, rf = synthetic(n=36, seed=5)
+    ols = factor_regression(r, f, rf)
+    hac = factor_regression(r, f, rf, hac_lags=3)
+    assert ols.use_t is True and hac.use_t is False
+    direct = sm.OLS(r - rf, sm.add_constant(f)).fit(cov_type="HAC", cov_kwds={"maxlags": 3})
+    np.testing.assert_allclose(hac.pvalues.to_numpy(), direct.pvalues.to_numpy(), rtol=1e-12)
+
+
+def test_hac_use_t_uses_t_distribution_and_is_less_significant():
+    from scipy import stats
+
+    r, f, rf = synthetic(n=24, alpha=0.001, noise=0.01, seed=11)
+    normal = factor_regression(r, f, rf, hac_lags=3)
+    t_dist = factor_regression(r, f, rf, hac_lags=3, use_t=True)
+    assert t_dist.use_t is True and t_dist.cov_type == "HAC"
+    # 系数与标准误相同，只有 p 值与置信区间换用 t 分布
+    np.testing.assert_allclose(t_dist.bse.to_numpy(), normal.bse.to_numpy(), rtol=1e-12)
+    df_resid = t_dist.n - f.shape[1] - 1
+    expected_p = 2 * stats.t.sf(np.abs(t_dist.tvalues.to_numpy()), df_resid)
+    np.testing.assert_allclose(t_dist.pvalues.to_numpy(), expected_p, rtol=1e-10)
+    q = stats.t.ppf(0.975, df_resid)
+    np.testing.assert_allclose(
+        t_dist.conf_int["upper"].to_numpy(), (t_dist.params + q * t_dist.bse).to_numpy(), rtol=1e-10
+    )
+    # 小样本下正态近似的 p 值更小、区间更窄，即高估显著性
+    assert (t_dist.pvalues > normal.pvalues).all()
+    width_t = t_dist.conf_int["upper"] - t_dist.conf_int["lower"]
+    width_n = normal.conf_int["upper"] - normal.conf_int["lower"]
+    assert (width_t > width_n).all()
+
+
+def test_capm_use_t_passthrough_and_validation(worked_example):
+    df = worked_example
+    res = capm_regression(df.portfolio, df.benchmark, df.risk_free, hac_lags=2, use_t=True)
+    assert res.use_t is True and res.cov_type == "HAC"
+    plain = capm_regression(df.portfolio, df.benchmark, df.risk_free, use_t=True)
+    default = capm_regression(df.portfolio, df.benchmark, df.risk_free)
+    np.testing.assert_allclose(plain.pvalues.to_numpy(), default.pvalues.to_numpy(), rtol=1e-12)
+    with pytest.raises(ValueError):
+        capm_regression(df.portfolio, df.benchmark, df.risk_free, use_t="yes")

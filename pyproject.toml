@@ -16,12 +16,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+data = ["akshare>=1.18.97"]
 excel = ["openpyxl>=3.1"]
 test = ["pytest>=7"]
+
+[project.scripts]
+fundeval = "fundeval.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m \"not network\""
+markers = [
+    "network: 需要访问 akshare 上游数据源的联网冒烟测试，默认跳过；用 pytest -m network 运行",
+]

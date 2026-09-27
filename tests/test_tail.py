@@ -126,3 +126,15 @@ def test_mar_array_pairs_by_position_before_dropping_nan():
     r = [0.01, np.nan, 0.00, 0.02]
     mar = [0.02, 0.50, 0.02, 0.01]  # 第 2 期随收益一起去除
     assert tail.downside_deviation(r, mar) == pytest.approx(math.sqrt((0.01**2 + 0.02**2) / 3))
+
+
+def test_calmar_returns_nan_on_missing_instead_of_skipping(worked_example):
+    # Calmar 不去除缺失值：跳过缺失月份相当于把该期当作零收益，年数 T 也会按 11 期算错
+    p = worked_example.portfolio.copy()
+    p.iloc[4] = np.nan
+    assert math.isnan(tail.calmar_ratio(p, K))
+    skipped = tail.calmar_ratio(p.dropna(), K)
+    assert np.isfinite(skipped) and skipped != pytest.approx(3.4019, abs=0.5e-4)
+    # 其他尾部函数按模块约定先去除 NaN
+    assert tail.historical_var(p, 0.95) == tail.historical_var(p.dropna(), 0.95)
+    assert tail.sortino_ratio(p, 0.0015, K) == pytest.approx(tail.sortino_ratio(p.dropna(), 0.0015, K))

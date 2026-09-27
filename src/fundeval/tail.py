@@ -4,7 +4,8 @@
 - Calmar：年化几何收益与最大回撤之比
 - 历史模拟 VaR 与 ES：损失 L = -r，以正数报告
 
-口径：所有函数先去除收益中的 NaN 再计算。下行偏差分母为全样本期数 n，高于 MAR 的偏差按零计入；Sortino 的分子为
+口径：下行偏差、Sortino、VaR 与 ES 先去除收益中的 NaN 再计算；Calmar 例外，收益中有缺失值时
+直接返回 NaN（见 calmar_ratio）。下行偏差分母为全样本期数 n，高于 MAR 的偏差按零计入；Sortino 的分子为
 同频算术均值，乘以 √K 年化。比率分母为零时返回 NaN，不报告无穷大。
 """
 
@@ -62,6 +63,10 @@ def calmar_ratio(returns, periods_per_year: int = 12) -> float:
     """Calmar = 年化几何收益 / 最大回撤（同一观察区间，回撤取正值）。
 
     样本内回撤为零时返回 NaN，不报告无穷大排名。
+
+    与本模块其他函数不同，这里不去除收益中的 NaN：有缺失值时年化收益为 NaN，结果返回 NaN。
+    若跳过缺失月份再连乘，等于把缺失期当作零收益，年数 T = n / K 也会按缺失后的期数算错，
+    因此缺失须先复核补齐，不能静默跳过。
     """
     r = as_series(returns)
     return safe_div(annualized_return(r, periods_per_year), max_drawdown(r))

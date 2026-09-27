@@ -63,33 +63,40 @@ class TimingResult(RegressionResult):
         return self.beta + self.gamma
 
 
-def _timing(returns, market, risk_free, hac_lags, model: str) -> TimingResult:
+def _timing(returns, market, risk_free, hac_lags, use_t, model: str) -> TimingResult:
     r, m = _align(returns, market)
     rf = broadcast_like(risk_free, r)
     y = (r - rf).rename("excess")
     x = m.iloc[:, 0] - rf
     extra = x**2 if model == "TM" else np.maximum(x, 0.0)
     design = pd.DataFrame({"beta": x, "gamma": extra})
-    res = fit_ols(y, design, hac_lags)
+    res = fit_ols(y, design, hac_lags, use_t)
     return TimingResult(**res.__dict__, model=model)
 
 
-def treynor_mazuy(returns, market, risk_free=0.0, hac_lags: int | None = None) -> TimingResult:
+def treynor_mazuy(
+    returns, market, risk_free=0.0, hac_lags: int | None = None, use_t: bool | None = None
+) -> TimingResult:
     """Treynor–Mazuy 择时回归 y = α + βx + γx² + ε。
 
     ``market`` 为市场原始收益，函数内部与组合收益一并减去 ``risk_free``。
-    ``hac_lags`` 的含义与 alpha.regression.factor_regression 相同。
+    ``hac_lags`` 与 ``use_t`` 的含义与 alpha.regression.factor_regression 相同：
+    ``use_t`` 为 None 时 OLS 用 t 分布、HAC 用正态近似；为 True 时 HAC 也用 t 分布。
+    小样本下正态近似会高估 γ 的显著性。
     γ 为正且显著可支持择时特征，但期权、动态风险控制等非线性策略同样可能产生
     这一结果，不能单凭 γ 断言经理具备择时能力。
     """
-    return _timing(returns, market, risk_free, hac_lags, "TM")
+    return _timing(returns, market, risk_free, hac_lags, use_t, "TM")
 
 
-def henriksson_merton(returns, market, risk_free=0.0, hac_lags: int | None = None) -> TimingResult:
+def henriksson_merton(
+    returns, market, risk_free=0.0, hac_lags: int | None = None, use_t: bool | None = None
+) -> TimingResult:
     """Henriksson–Merton 择时回归 y = α + βx + γ·max(x, 0) + ε。
 
     结果给出下行 Beta ``downside_beta`` = β 与上行 Beta ``upside_beta`` = β + γ。
+    ``hac_lags`` 与 ``use_t`` 的含义与 treynor_mazuy 相同；小样本下正态近似会高估显著性。
     γ 为正且显著可支持择时特征，但期权、动态风险控制等非线性策略同样可能产生
     这一结果，不能单凭 γ 断言经理具备择时能力。
     """
-    return _timing(returns, market, risk_free, hac_lags, "HM")
+    return _timing(returns, market, risk_free, hac_lags, use_t, "HM")
