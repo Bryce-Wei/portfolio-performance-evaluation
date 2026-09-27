@@ -37,7 +37,7 @@ from fundeval.etl.benchmark import (
     total_return_code,
 )
 from fundeval.etl.quality import CROSS_CHECK_TOLERANCE
-from fundeval.etl.sources.akshare import DEFAULT_TIMEOUT
+from fundeval.etl.sources.akshare import DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT
 from fundeval.etl.returns import period_code, to_frequency
 from fundeval.etl.sources import files
 from fundeval.report import evaluate, to_excel, to_markdown
@@ -148,9 +148,13 @@ def _benchmark_from_akshare(spec, start, end, freq, cache, *, return_type="total
 def _build_report_inputs(args):
     freq = args.freq.upper()
     k = schema.periods_per_year(freq)
-    if args.timeout is not None and args.timeout <= 0:
-        raise ValueError(f"--timeout 须为正数（秒），收到 {args.timeout}")
-    cache = {"cache_dir": args.cache_dir, "use_cache": not args.no_cache, "refresh": args.refresh, "timeout": args.timeout}
+    for flag, value in (("--timeout", args.timeout), ("--total-timeout", args.total_timeout)):
+        if value is not None and value <= 0:
+            raise ValueError(f"{flag} 须为正数（秒），收到 {value}")
+    cache = {
+        "cache_dir": args.cache_dir, "use_cache": not args.no_cache, "refresh": args.refresh,
+        "timeout": args.timeout, "total_timeout": args.total_timeout,
+    }
     labels = {"fees": args.fees}
     if args.title:
         labels["title"] = args.title
@@ -307,7 +311,13 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--refresh", action="store_true", help="忽略已有缓存，重新请求并覆盖")
     rp.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT,
-        help=f"每次上游请求的超时秒数（默认 {DEFAULT_TIMEOUT:g}）；超时按网络异常重试或切换数据源",
+        help=f"单个 HTTP 请求（连接与读取）的超时秒数（默认 {DEFAULT_TIMEOUT:g}）；分页接口每页单独计时，"
+        "超时按网络异常重试或切换数据源",
+    )
+    rp.add_argument(
+        "--total-timeout", type=float, default=DEFAULT_TOTAL_TIMEOUT,
+        help=f"每次尝试（一次接口调用，可含多个分页请求）的兜底总时限秒数（默认 {DEFAULT_TOTAL_TIMEOUT:g}），"
+        "每次重试重新计时；超时后后台线程可能仍在运行，其结果被丢弃",
     )
     rp.set_defaults(func=cmd_report)
     return parser

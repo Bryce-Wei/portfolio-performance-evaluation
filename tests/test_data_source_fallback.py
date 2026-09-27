@@ -14,7 +14,7 @@ import requests
 from fundeval import cli
 from fundeval.etl import benchmark as bm
 from fundeval.etl.sources import akshare as aks
-from fake_akshare import FakeAkshare
+from fake_akshare import FakeAkshare, patch_http
 
 START, END = "2024-01-01", "2024-02-29"
 EM_DOWN = ConnectionError("Remote end closed connection without response")
@@ -342,10 +342,11 @@ def hanging(monkeypatch):
 
 
 def test_hanging_request_times_out_and_is_retried(hanging, cache, sleeps):
+    # 上游不经 requests 挂起：只能由线程层的总时限兜底
     fake = hanging(hang={"fund_open_fund_info_em": 30})
     t0 = time.monotonic()
-    with pytest.raises(aks.UpstreamTimeout, match="超过 0.2 秒未返回"):
-        aks.fund_returns("110011", START, END, timeout=0.2, **cache)
+    with pytest.raises(aks.UpstreamTimeout, match="超过总时限 0.2 秒未返回"):
+        aks.fund_returns("110011", START, END, timeout=0.1, total_timeout=0.2, **cache)
     assert time.monotonic() - t0 < 5
     assert fake.count("fund_open_fund_info_em") == 3 and sleeps == [1.0, 2.0]
     assert aks.is_network_error(aks.UpstreamTimeout("x"))
@@ -354,15 +355,79 @@ def test_hanging_request_times_out_and_is_retried(hanging, cache, sleeps):
 def test_hanging_index_falls_back_to_csindex(hanging, cache, sleeps):
     fake = hanging(hang={"index_zh_a_hist": 30})
     with pytest.warns(RuntimeWarning, match="UpstreamTimeout.*已改用中证指数官网"):
-        r = aks.index_returns("000300", START, END, timeout=0.2, **cache)
+        r = aks.index_returns("000300", START, END, timeout=0.1, total_timeout=0.2, **cache)
     assert r.attrs["source"] == "csindex" and fake.count("index_zh_a_hist") == 3
+
+
+# 默认参数按 1:10 缩小：单请求 0.1 秒、总时限 1 秒（默认为 30 秒与 300 秒）
+SCALE = 30 / 0.1
+REQUEST_TIMEOUT = aks.DEFAULT_TIMEOUT / SCALE
+TOTAL_TIMEOUT = aks.DEFAULT_TOTAL_TIMEOUT / SCALE
+
+
+def test_default_timeouts_are_per_request_and_total():
+    assert (aks.DEFAULT_TIMEOUT, aks.DEFAULT_TOTAL_TIMEOUT) == (30.0, 300.0)
+    parser = cli.build_parser()
+    args = parser.parse_args(["report", "--fund", "110011"])
+    assert (args.timeout, args.total_timeout) == (30.0, 300.0)
+
+
+def test_paged_interface_succeeds_under_default_timeouts(hanging, monkeypatch, cache, sleeps):
+    # Shibor 3M 一次调用约翻 10 页；每页耗时略低于单请求超时，总耗时远超单请求超时
+    fake = hanging(pages={"rate_interbank": [0.07] * 10})
+    patch_http(monkeypatch, fake)
+    t0 = time.monotonic()
+    rf = aks.risk_free_returns(
+        START, END, "M", source="auto", timeout=REQUEST_TIMEOUT, total_timeout=TOTAL_TIMEOUT, **cache
+    )
+    elapsed = time.monotonic() - t0
+    assert rf.attrs["source"] == "shibor3m" and rf.attrs["failed"] == []
+    assert fake.count("rate_interbank") == 1 and sleeps == []
+    assert len(fake.http) == 10 and all(t == REQUEST_TIMEOUT for _, t in fake.http)
+    assert 0.7 <= elapsed < 3
+
+
+def test_paged_interface_would_fail_if_whole_call_were_capped_by_request_timeout(hanging, monkeypatch, cache, sleeps):
+    # 旧语义（整次调用限单请求超时）下，分页接口每次尝试都超时，--rf auto 白等后才切到国债
+    fake = hanging(pages={"rate_interbank": [0.07] * 10})
+    patch_http(monkeypatch, fake)
+    with pytest.warns(RuntimeWarning, match="Shibor.*UpstreamTimeout.*已改用"):
+        rf = aks.risk_free_returns(
+            START, END, "M", source="auto", timeout=REQUEST_TIMEOUT, total_timeout=REQUEST_TIMEOUT, **cache
+        )
+    assert rf.attrs["source"] == "cgb2y" and fake.count("rate_interbank") == 3
+
+
+def test_single_hanging_request_is_retried_after_request_timeout(hanging, monkeypatch, cache, sleeps):
+    # 首次调用的请求挂起（requests 未设超时时会一直等），第二次调用正常
+    fake = hanging(pages={"rate_interbank": [[30], [0.01]]})
+    patch_http(monkeypatch, fake)
+    t0 = time.monotonic()
+    rate = aks.rate_series("shibor3m", START, END, timeout=REQUEST_TIMEOUT, total_timeout=30, **cache)
+    elapsed = time.monotonic() - t0
+    assert len(rate) > 10
+    assert fake.count("rate_interbank") == 2 and sleeps == [1.0]
+    assert [t for _, t in fake.http] == [REQUEST_TIMEOUT, REQUEST_TIMEOUT]
+    assert REQUEST_TIMEOUT <= elapsed < 2  # 在单请求超时后重试，而不是等 30 秒的总时限
+
+
+def test_hanging_request_exhausts_retries_with_requests_timeout(hanging, monkeypatch, cache, sleeps):
+    fake = hanging(pages={"rate_interbank": [30]})
+    patch_http(monkeypatch, fake)
+    t0 = time.monotonic()
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        aks.rate_series("shibor3m", START, END, timeout=REQUEST_TIMEOUT, total_timeout=30, **cache)
+    assert time.monotonic() - t0 < 2
+    assert fake.count("rate_interbank") == 3 and sleeps == [1.0, 2.0]
 
 
 def test_timeout_none_and_invalid(monkeypatch, cache):
     use(monkeypatch, FakeAkshare())
-    assert len(aks.index_returns("000300", START, END, timeout=None, **cache)) > 30
+    assert len(aks.index_returns("000300", START, END, timeout=None, total_timeout=None, **cache)) > 30
     with pytest.raises(ValueError, match="timeout"):
         aks.index_returns("000300", START, END, timeout=0, use_cache=False)
+    with pytest.raises(ValueError, match="total_timeout"):
+        aks.index_returns("000300", START, END, total_timeout=-1, use_cache=False)
 
 
 def test_requests_default_timeout_is_injected_only_during_calls(monkeypatch):
@@ -374,11 +439,15 @@ def test_requests_default_timeout_is_injected_only_during_calls(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(requests.Session, "request", fake_request)
-    assert aks._call_with_timeout(lambda: requests.get("https://example.invalid"), 7.5, "test") == "ok"
-    assert seen["timeout"] == 7.5
-    # 调用方已给 timeout 时不覆盖
-    aks._call_with_timeout(lambda: requests.get("https://example.invalid", timeout=3), 7.5, "test")
-    assert seen["timeout"] == 3
+    for total in (None, 5):
+        assert aks._call_with_timeout(lambda: requests.get("https://example.invalid"), 7.5, "test", total) == "ok"
+        assert seen["timeout"] == 7.5
+        # 调用方已给 timeout 时不覆盖
+        aks._call_with_timeout(lambda: requests.get("https://example.invalid", timeout=3), 7.5, "test", total)
+        assert seen["timeout"] == 3
+    # timeout=None 时不注入
+    aks._call_with_timeout(lambda: requests.get("https://example.invalid"), None, "test", 5)
+    assert seen["timeout"] is None
     # 调用结束后恢复原方法
     assert requests.Session.request is fake_request and fake_request is not original
 
@@ -388,8 +457,24 @@ def test_cli_timeout_gives_friendly_error(hanging, tmp_path, capsys, sleeps):
     t0 = time.monotonic()
     code = cli.main([
         "report", "--fund", "110011", "--rf", "0.018", "--start", START, "--end", END,
-        "--timeout", "0.2", "--cache-dir", str(tmp_path / "c"),
+        "--timeout", "0.1", "--total-timeout", "0.2", "--cache-dir", str(tmp_path / "c"),
     ])
     err = capsys.readouterr().err
     assert code == 2 and time.monotonic() - t0 < 5
-    assert "Traceback" not in err and "网络请求失败" in err and "超过 0.2 秒未返回" in err
+    assert "Traceback" not in err and "网络请求失败" in err and "超过总时限 0.2 秒未返回" in err
+
+
+def test_cli_rf_auto_uses_paged_shibor_with_scaled_defaults(hanging, monkeypatch, tmp_path, sleeps):
+    fake = hanging(pages={"rate_interbank": [0.07] * 10})
+    patch_http(monkeypatch, fake)
+    code, text, _, _ = _fund_report(
+        monkeypatch, tmp_path, "--rf", "auto", "--timeout", str(REQUEST_TIMEOUT),
+        "--total-timeout", str(TOTAL_TIMEOUT), fake=fake,
+    )
+    assert code == 0 and "Shibor" in text and "获取失败后改用" not in text
+    assert fake.count("bond_zh_us_rate") == 0
+
+
+def test_cli_rejects_non_positive_total_timeout(tmp_path, capsys):
+    code = cli.main(["report", "--fund", "110011", "--rf", "0.018", "--total-timeout", "0", "--no-cache"])
+    assert code != 0 and "--total-timeout 须为正数" in capsys.readouterr().err

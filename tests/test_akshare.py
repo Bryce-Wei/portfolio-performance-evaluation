@@ -269,17 +269,72 @@ def test_akshare_not_installed(monkeypatch):
 # ------------------------------ 联网冒烟测试（默认跳过） ------------------------------
 
 
-@pytest.mark.network
-def test_network_smoke(tmp_path):
+# 联网冒烟测试按数据源拆开：一个数据源不可达不影响其他项。
+NET_START, NET_END = "2024-01-01", "2024-03-31"
+
+
+@pytest.fixture
+def net_kw(tmp_path):
     pytest.importorskip("akshare")
-    kw = {"cache_dir": tmp_path}
-    r, check = aks.fund_returns("110011", "2024-01-01", "2024-03-31", return_check=True, **kw)
+    return {"cache_dir": tmp_path}
+
+
+def _connection_errors():
+    import requests
+
+    # requests.ConnectionError 含 ConnectTimeout、ProxyError、SSLError；内置 ConnectionError 含连接重置
+    return (requests.exceptions.ConnectionError, ConnectionError)
+
+
+@pytest.mark.network
+def test_network_fund(net_kw):
+    """基金净值与分红（东方财富 fund_open_fund_info_em）。"""
+    r, check = aks.fund_returns("110011", NET_START, NET_END, return_check=True, **net_kw)
     assert len(r) > 40 and check["flagged"].mean() < 0.05
-    assert len(aks.index_returns("000300", "2024-01-01", "2024-03-31", **kw)) > 40
-    assert len(aks.index_returns("H11001", "2024-01-01", "2024-03-31", **kw)) > 40
-    assert len(aks.index_returns("cbond:composite", "2024-01-01", "2024-03-31", **kw)) > 40
-    assert aks.risk_free_returns("2024-01-01", "2024-03-31", "M", source="shibor3m", **kw).notna().all()
-    assert aks.risk_free_returns("2024-01-01", "2024-03-31", "M", source="cgb10y", **kw).notna().all()
+
+
+@pytest.mark.network
+def test_network_index_eastmoney(net_kw):
+    """东方财富指数行情 index_zh_a_hist；指定 source="em"，不让自动切换掩盖故障。"""
+    r = aks.index_returns("000300", NET_START, NET_END, source="em", **net_kw)
+    assert len(r) > 40 and r.attrs["source"] == "em"
+
+
+@pytest.mark.network
+def test_network_index_csindex(net_kw):
+    """中证指数官网 stock_zh_index_hist_csindex：全收益指数 H00300 与中证全债 H11001。"""
+    for code in ("H00300", "H11001"):
+        r = aks.index_returns(code, NET_START, NET_END, source="csindex", **net_kw)
+        assert len(r) > 40 and r.attrs["source"] == "csindex", code
+
+
+@pytest.mark.network
+def test_network_chinabond(net_kw):
+    """中债综合财富指数（yield.chinabond.com.cn）。
+
+    该网站在部分网络环境下无法建立连接：连接类异常时 skip 并注明原因；
+    数据格式或列名错误（AkshareInterfaceError 等）仍然算失败。
+    """
+    try:
+        r = aks.index_returns("cbond:composite", NET_START, NET_END, **net_kw)
+    except _connection_errors() as exc:
+        pytest.skip(f"中债网站 yield.chinabond.com.cn 无法建立连接（{type(exc).__name__}: {exc}），跳过")
+    assert len(r) > 40 and r.attrs["source"] == "cbond"
+
+
+@pytest.mark.network
+def test_network_shibor(net_kw):
+    """Shibor 3M（rate_interbank，一次调用约翻 10 页，按默认的单请求超时应能完成）。"""
+    rf = aks.risk_free_returns(NET_START, NET_END, "M", source="shibor3m", **net_kw)
+    assert rf.notna().all() and rf.attrs["source"] == "shibor3m"
+
+
+@pytest.mark.network
+def test_network_government_bond(net_kw):
+    """中国国债收益率（bond_zh_us_rate）：2 年期（自动切换的备选）与 10 年期。"""
+    for source in ("cgb2y", "cgb10y"):
+        rf = aks.risk_free_returns(NET_START, NET_END, "M", source=source, **net_kw)
+        assert rf.notna().all() and rf.attrs["source"] == source, source
 
 
 @pytest.mark.network

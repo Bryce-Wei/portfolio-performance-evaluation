@@ -6,6 +6,12 @@
 
 ``hang`` 把接口名映射到挂起秒数，模拟上游请求迟迟不返回（akshare 内部 requests 未设超时）；
 测试结束时调用 ``release()`` 让挂起的后台线程立即退出。
+
+``pages`` 把接口名映射到每页耗时（秒）的列表，模拟需要翻页的接口（如 rate_interbank 约 10 页）：
+每页经 requests.get 发出一个真实的请求对象，由 ``patch_http`` 安装的假传输层按耗时响应。
+假传输层遵守请求的 timeout：耗时不小于读取超时时，等待满超时后抛出 requests.ReadTimeout。
+值也可以是“每次调用一个列表”的列表，第 k 次调用取第 k 个（超出时取最后一个），
+例如 ``[[30], [0.01]]`` 表示首次调用的请求挂起、之后的调用立即返回。
 """
 
 import threading
@@ -13,6 +19,7 @@ import types
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 DATA = Path(__file__).parent / "data" / "akshare"
 
@@ -20,9 +27,10 @@ DATA = Path(__file__).parent / "data" / "akshare"
 class FakeAkshare(types.SimpleNamespace):
     """按接口签名返回样本，并记录调用次数。"""
 
-    def __init__(self, fail=None, hang=None):
+    def __init__(self, fail=None, hang=None, pages=None):
         super().__init__(
-            __version__="fake", calls=[], fail=dict(fail or {}), hang=dict(hang or {}), _released=threading.Event()
+            __version__="fake", calls=[], fail=dict(fail or {}), hang=dict(hang or {}), pages=dict(pages or {}),
+            http=[], _released=threading.Event(),
         )
 
     def release(self):
@@ -35,6 +43,13 @@ class FakeAkshare(types.SimpleNamespace):
         if name in self.fail:
             exc = self.fail[name]
             raise exc() if isinstance(exc, type) else exc
+        if name in self.pages:
+            delays = self.pages[name]
+            if delays and isinstance(delays[0], (list, tuple)):
+                delays = delays[min(self.count(name), len(delays)) - 1]
+            for i, delay in enumerate(delays, 1):
+                # 与 akshare 一样不传 timeout
+                requests.get(f"http://fake-akshare.invalid/{name}?page={i}", headers={"X-Fake-Delay": str(delay)})
 
     def fund_open_fund_info_em(self, symbol="710001", indicator="单位净值走势", period="成立来"):
         self._log("fund_open_fund_info_em", symbol=symbol, indicator=indicator)
@@ -62,3 +77,24 @@ class FakeAkshare(types.SimpleNamespace):
 
     def count(self, name):
         return sum(1 for n, _ in self.calls if n == name)
+
+
+def patch_http(monkeypatch, fake):
+    """把 requests 的传输层替换为按 X-Fake-Delay 头耗时响应的假实现，记录每个请求收到的 timeout。"""
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        delay = float(request.headers.get("X-Fake-Delay", 0))
+        read_timeout = timeout[1] if isinstance(timeout, tuple) else timeout
+        fake.http.append((request.url, read_timeout))
+        if read_timeout is not None and delay >= read_timeout:
+            fake._released.wait(read_timeout)
+            raise requests.exceptions.ReadTimeout(f"Read timed out. (read timeout={read_timeout})", request=request)
+        fake._released.wait(delay)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"{}"
+        response.url = request.url
+        response.request = request
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
