@@ -1,7 +1,7 @@
 """一键评价报告：正文第九部分“从原始数据到绩效结果”与第十部分“形成可用于管理决策的结论”。
 
 ``evaluate`` 按正文六个评价维度组织结果：口径、收益表现、风险效率、下行与尾部、
-Alpha 质量、持续监控，另附数据质量与未完成的检验。``conclusion`` 按第十部分把
+Alpha 质量、收益来源（风格分析）、持续监控，另附剔除异常期的稳健性检验、数据质量与未完成的检验。``conclusion`` 按第十部分把
 “观察到的表现”“可以支持的解释”“需要进一步验证的判断”分三段写成文字。
 
 口径沿用各模块：比率使用同频算术均值与样本标准差（n−1），乘以 √K 年化；
@@ -21,6 +21,8 @@ import pandas as pd
 from fundeval import monitor, risk, tail
 from fundeval import returns as ret
 from fundeval.alpha.regression import RegressionResult, capm_regression
+from fundeval.alpha.robustness import ExclusionSensitivity, exclusion_sensitivity
+from fundeval.attribution.style import RollingStyleResult, StyleResult, rolling_style, style_analysis
 from fundeval.attribution.timing import TimingResult, henriksson_merton, treynor_mazuy
 from fundeval.etl import clean, schema
 from fundeval.etl.benchmark import PRICE_INDEX_CAVEAT, needs_price_caveat
@@ -35,7 +37,10 @@ MIN_TAIL_OBS = 5
 #: 默认费用口径
 DEFAULT_FEE_BASIS = "费用后净值"
 
-SECTIONS = ("收益表现", "风险效率", "下行与尾部", "Alpha 质量", "持续监控")
+SECTIONS = ("收益表现", "风险效率", "下行与尾部", "Alpha 质量", "收益来源", "持续监控")
+
+#: 风格分析的限定语（正文第五部分第 1 节）
+STYLE_CAVEAT = "风格权重是统计估计，不等于实际持仓；残差均值不能直接视为扣除一切风险后的选股能力"
 
 _FREQ_NAMES = {252: "日度", 52: "周度", 12: "月度", 4: "季度", 1: "年度"}
 
@@ -77,6 +82,8 @@ class EvaluationReport:
     - ``scope``：口径（有序字典，项目 → 内容）
     - ``metrics``：各维度指标表，索引为指标键，列为 section、label、value、unit、note
     - ``capm`` / ``timing``：CAPM 回归与 TM、HM 择时回归结果（样本不足时为 None）
+    - ``robustness``：剔除异常期的敏感性分析（未做回归或关闭时为 None）
+    - ``style`` / ``style_rolling``：全样本与滚动风格分析（未提供风格指数时为 None）
     - ``monitoring``：持续监控结果（未给出 monitor_targets 时为 None）
     - ``quality``：数据质量报告
     - ``not_done``：未完成的检验（检验、状态、原因）
@@ -96,6 +103,9 @@ class EvaluationReport:
     labels: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     benchmark_return_type: str | None = None
+    robustness: ExclusionSensitivity | None = None
+    style: StyleResult | None = None
+    style_rolling: RollingStyleResult | None = None
 
     @property
     def price_index_caveat(self) -> bool:
@@ -160,6 +170,18 @@ class EvaluationReport:
                     }
                 )
         return pd.DataFrame(rows)
+
+    def robustness_table(self) -> pd.DataFrame:
+        """剔除异常期前后的关键系数（CAPM Alpha、TM γ、HM γ）；未做时为空表。"""
+        if self.robustness is None or not self.robustness.done:
+            return pd.DataFrame()
+        return self.robustness.key_table()
+
+    def style_table(self) -> pd.DataFrame:
+        """全样本风格权重表：风格、权重；未做风格分析时为空表。"""
+        if self.style is None:
+            return pd.DataFrame()
+        return self.style.table()
 
     def conclusion(self) -> str:
         return conclusion(self)
@@ -278,6 +300,10 @@ def evaluate(
     confidence: float = 0.95,
     use_t: bool | None = None,
     notes: list[str] | tuple[str, ...] | None = None,
+    style_returns: pd.DataFrame | None = None,
+    style_window: int | None = None,
+    style_objective: str = "variance",
+    robustness: bool = True,
 ) -> EvaluationReport:
     """生成评价报告（正文第九、十部分）。
 
@@ -301,6 +327,12 @@ def evaluate(
     confidence : VaR / ES 置信水平
     use_t : 传给 CAPM、TM、HM 回归；True 时 HAC 的 p 值与置信区间也用 t 分布（小样本建议）
     notes : 调用方附加的说明（如数据源自动切换、使用旧缓存），写入附注
+    style_returns : 风格指数单期收益（DataFrame，每列一个风格，可含现金列）；给出时在“收益来源”
+        一节做 Sharpe 风格分析（attribution.style），须覆盖全部共同期，否则报错
+    style_window : 给出时另做滚动风格分析，窗口期数不小于风格资产数 + 2
+    style_objective : 风格分析的目标函数，"variance"（默认）或 "sse"
+    robustness : 默认 True：剔除数据质量报告标为异常收益的期（组合、基准或市场任一被标记即剔除），
+        重新估计 CAPM、TM、HM 回归，报告两组系数与 t 值（alpha.robustness）
 
     组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。口径中写明
     “组合 N 期、基准 M 期、共同 K 期”，有期数被丢弃时在附注中列出其起止日期；
@@ -402,6 +434,16 @@ def evaluate(
             timing["HM"] = henriksson_merton(p, m, rf, hac_lags=hac_lags, use_t=use_t)
         except ValueError as exc:
             regression_error = str(exc)
+    robust = None
+    if robustness and capm is not None:
+        flagged_cols = [c for c in (schema.PORTFOLIO, schema.BENCHMARK, schema.MARKET) if c in raw_parts]
+        out_df = quality.outliers
+        flagged = out_df.loc[out_df["column"].isin(flagged_cols), "date"] if len(out_df) else []
+        exclude = pd.DatetimeIndex(pd.DatetimeIndex(flagged).unique()).intersection(p.index)
+        robust = exclusion_sensitivity(
+            p, m, rf, exclude, hac_lags=hac_lags, use_t=use_t,
+            full={name: res for name, res in (("CAPM", capm), *timing.items()) if res is not None},
+        )
     if capm is not None:
         se = _se_label(capm)
         proxy = "；以基准代替市场" if market_proxy else ""
@@ -421,6 +463,39 @@ def evaluate(
         name = "TM" if key == "TM" else "HM"
         add(s, f"{key.lower()}_gamma", f"{name} 择时 γ", res.gamma, RATIO, "TM：x² 系数" if key == "TM" else "HM：max(x, 0) 系数")
         add(s, f"{key.lower()}_gamma_t", f"{name} γ t 值", res.gamma_t, RATIO, _se_label(res))
+
+    # ------------------------------ 收益来源：风格分析 ------------------------------
+    style = style_roll = None
+    if style_returns is None and style_window is not None:
+        raise ValueError("给出 style_window 时须同时给出 style_returns")
+    if style_returns is not None:
+        if not isinstance(style_returns, pd.DataFrame) or not isinstance(style_returns.index, pd.DatetimeIndex):
+            raise schema.SchemaError("style_returns 须为以 DatetimeIndex 为索引的 DataFrame")
+        sr = style_returns.astype(float).reindex(p.index)
+        gaps = sr.isna().any(axis=1)
+        if gaps.any():
+            cols = [c for c in sr.columns if sr[c].isna().any()]
+            raise ValueError(
+                f"风格指数未覆盖全部 {len(p)} 个共同期：{'、'.join(map(str, cols))} 缺 {int(gaps.sum())} 期"
+                f"（首个 {p.index[gaps.to_numpy()][0]:%Y-%m-%d}），请缩短区间或更换风格指数"
+            )
+        style = style_analysis(p, sr, objective=style_objective)
+        if style_window is not None:
+            style_roll = rolling_style(p, sr, style_window, objective=style_objective)
+        s = "收益来源"
+        obj_note = "最小化残差方差" if style.objective == "variance" else "最小化残差平方和"
+        for col, w in style.weights.items():
+            add(s, f"style_weight_{col}", f"风格权重：{col}", float(w), PCT, f"Sharpe 风格分析，w ≥ 0、Σw = 1，{obj_note}")
+        add(s, "style_r_squared", "风格分析 R²", style.r_squared, RATIO, "1 − Var(ε) / Var(r_p)")
+        add(s, "style_residual_mean", "残差均值（每期）", style.residual_mean, PCT, "ε = r_p − Σ w_k r_k")
+        add(s, "style_residual_mean_annualized", "残差均值（算术年化）", style.annualized_residual_mean(k), PCT,
+            "每期均值 × K，算术口径；不能直接视为选股能力")
+        add(s, "style_residual_volatility", "残差年化波动", style.annualized_residual_volatility(k), PCT, "样本标准差 × √K")
+        add(s, "style_n", "风格分析样本期数 n", style.n, COUNT)
+        if style_roll is not None:
+            add(s, "style_window", "滚动窗口", style_roll.window, COUNT, f"期，共 {len(style_roll.weights)} 个窗口")
+        if style.collinear_pairs:
+            notes.append(f"风格分析：{style.diagnostics['collinearity_warning']}。")
 
     # ------------------------------ 持续监控 ------------------------------
     monitoring = None
@@ -475,6 +550,10 @@ def evaluate(
         scope["基准数据源"] = labels["benchmark_source"]
     if "benchmark_note" in labels:
         scope["基准说明"] = labels["benchmark_note"]
+    if style is not None:
+        scope["风格指数"] = labels.get("style", "、".join(map(str, style.weights.index)))
+        if "style_source" in labels:
+            scope["风格指数数据源"] = labels["style_source"]
     scope["市场代理"] = labels.get("market", "市场") if market is not None else ("以基准代替" if b is not None else "未提供")
     scope["无风险收益"] = _rf_description(risk_free, labels)
     scope["费用口径"] = labels.get("fees", DEFAULT_FEE_BASIS)
@@ -483,8 +562,10 @@ def evaluate(
         notes.append("未提供市场收益，Treynor、CAPM 与择时回归以基准代替市场。")
 
     # ------------------------------ 未完成的检验 ------------------------------
-    not_done = [
-        ("风格分析（第五部分第 1 节）", "未做", "fundeval 尚未实现风格分析模块，且需风格指数收益"),
+    not_done = []
+    if style is None:
+        not_done.append(("风格分析（第五部分第 1 节）", "未做", "未提供风格指数收益（CLI 用 --style，Python 用 style_returns）"))
+    not_done += [
         ("多因子分解（第五部分第 3 节）", "未做", "尚未实现，需因子收益数据（French 等数据源待加入）"),
         ("Brinson 归因（第五部分第 2 节）", "未做", "需要持仓与行业权重；持仓齐备后可用 fundeval.attribution.brinson"),
         ("样本外检验（第四部分第 3 节）", "未做", "报告只做全样本估计；样本外须事前规定切分点（alpha.rolling.split_in_out_of_sample）"),
@@ -520,6 +601,9 @@ def evaluate(
         labels=labels,
         notes=notes + extra_notes,
         benchmark_return_type=benchmark_type,
+        robustness=robust,
+        style=style,
+        style_rolling=style_roll,
     )
 
 
@@ -646,12 +730,21 @@ def conclusion(report: EvaluationReport) -> str:
             if any(res.gamma_t > -T_THRESHOLD for res in r.timing.values() if res is not None):
                 reminder = "γ 显著为正也可能来自期权类或动态风险控制等非线性策略，不能单凭 γ 认定择时能力。"
             sup.append("；".join(timing_text) + "。" + reminder)
+        if r.robustness is not None and r.robustness.sensitive:
+            sup.append(f"上述 {'、'.join(r.robustness.changed)} 的结论对异常期敏感，见下文稳健性检验。")
     else:
         sup.append("未做 CAPM 回归与择时检验（缺少基准或样本不足），无法区分收益来源。")
         if r.price_index_caveat:
             sup.append(_price_caveat_sentence(r))
         if r.short_sample:
             sup.append(f"样本较短（{r.n} 期，不足 {SHORT_SAMPLE_YEARS * 12} 个月），上述表现不足以支持能力判断。")
+    if r.style is not None:
+        top = r.style.top(2)
+        names = "与".join(f"{name}（权重 {_pct(w, 1)}）" for name, w in top.items())
+        sup.append(
+            f"Sharpe 风格分析显示，收益变化最接近{names}（R² = {r.style.r_squared:.2f}，"
+            f"残差均值算术年化 {_pct(r.style.annualized_residual_mean(k))}，n = {r.style.n}）；{STYLE_CAVEAT}。"
+        )
     if has("sortino"):
         sup.append(
             f"下行风险方面，Sortino 比率 {format_value(r.metric('sortino'), RATIO)}（年化），"
@@ -663,6 +756,8 @@ def conclusion(report: EvaluationReport) -> str:
     todo = [row["检验"] for _, row in r.not_done.iterrows()]
     if todo:
         ver.append("以下检验未做：" + "；".join(todo) + "。收益是否来自风格暴露、因子溢价或费用前后差异，需补做后再下结论。")
+    if r.robustness is not None:
+        ver.append("稳健性（剔除异常期）：" + r.robustness.summary())
     if has("var"):
         ver.append(
             f"历史 VaR {_pct(r.metric('var'))}、ES {_pct(r.metric('es'))}（{r.metrics.loc['var', 'label'].split('（')[-1].rstrip('）')}，单期损失）"

@@ -132,13 +132,13 @@ def test_evaluate_benchmark_return_type_label(worked_example):
 # ------------------------------ 二、重试与自动切换 ------------------------------
 
 
-def test_index_auto_falls_back_to_csindex_after_retries(monkeypatch, cache, sleeps):
+def test_index_auto_falls_back_to_csindex_after_one_attempt(monkeypatch, cache, sleeps):
     fake = use(monkeypatch, FakeAkshare(fail={"index_zh_a_hist": EM_DOWN}))
     with aks.collect_notes() as notes:
         with pytest.warns(RuntimeWarning, match="已改用中证指数官网"):
             r = aks.index_returns("000300", START, END, **cache)
-    assert fake.count("index_zh_a_hist") == aks.MAX_ATTEMPTS == 3
-    assert sleeps == [1.0, 2.0]  # 指数退避
+    # 东方财富不是最后一个候选：只试 1 次就切换，不退避等待
+    assert fake.count("index_zh_a_hist") == 1 and sleeps == []
     assert fake.count("stock_zh_index_hist_csindex") == 1
     assert r.attrs["source"] == "csindex" and "中证指数官网" in r.attrs["source_label"]
     assert len(notes) == 1 and "000300" in notes[0] and "ConnectionError" in notes[0]
@@ -180,7 +180,7 @@ def test_retry_recovers_from_transient_failure(monkeypatch, cache, sleeps):
         return original(**kwargs)
 
     fake.index_zh_a_hist = flaky
-    r = aks.index_returns("000300", START, END, **cache)
+    r = aks.index_returns("000300", START, END, source="em", **cache)  # 指定单一数据源时按 MAX_ATTEMPTS 重试
     assert state["n"] == 2 and sleeps == [1.0] and r.attrs["source"] == "em"
 
 
@@ -189,7 +189,7 @@ def test_risk_free_auto_falls_back_to_cgb2y(monkeypatch, cache, sleeps):
     with aks.collect_notes() as notes:
         with pytest.warns(RuntimeWarning, match="已改用中国国债 2 年期收益率"):
             rf = aks.risk_free_returns(START, END, "M", source="auto", **cache)
-    assert fake.count("rate_interbank") == 3 and fake.count("bond_zh_us_rate") == 1
+    assert fake.count("rate_interbank") == 1 and fake.count("bond_zh_us_rate") == 1 and sleeps == []
     assert rf.attrs["source"] == "cgb2y" and rf.attrs["failed"] == ["shibor3m"]
     assert "中国国债 2 年期收益率（Shibor 3M 获取失败后改用）" in rf.attrs["description"]
     assert len(notes) == 1 and "ChunkedEncodingError" in notes[0]
@@ -356,7 +356,7 @@ def test_hanging_index_falls_back_to_csindex(hanging, cache, sleeps):
     fake = hanging(hang={"index_zh_a_hist": 30})
     with pytest.warns(RuntimeWarning, match="UpstreamTimeout.*已改用中证指数官网"):
         r = aks.index_returns("000300", START, END, timeout=0.1, total_timeout=0.2, **cache)
-    assert r.attrs["source"] == "csindex" and fake.count("index_zh_a_hist") == 3
+    assert r.attrs["source"] == "csindex" and fake.count("index_zh_a_hist") == 1
 
 
 # 默认参数按 1:10 缩小：单请求 0.1 秒、总时限 1 秒（默认为 30 秒与 300 秒）
@@ -388,14 +388,14 @@ def test_paged_interface_succeeds_under_default_timeouts(hanging, monkeypatch, c
 
 
 def test_paged_interface_would_fail_if_whole_call_were_capped_by_request_timeout(hanging, monkeypatch, cache, sleeps):
-    # 旧语义（整次调用限单请求超时）下，分页接口每次尝试都超时，--rf auto 白等后才切到国债
+    # 旧语义（整次调用限单请求超时）下，分页接口每次尝试都超时，--rf auto 切到国债（Shibor 只试 1 次）
     fake = hanging(pages={"rate_interbank": [0.07] * 10})
     patch_http(monkeypatch, fake)
     with pytest.warns(RuntimeWarning, match="Shibor.*UpstreamTimeout.*已改用"):
         rf = aks.risk_free_returns(
             START, END, "M", source="auto", timeout=REQUEST_TIMEOUT, total_timeout=REQUEST_TIMEOUT, **cache
         )
-    assert rf.attrs["source"] == "cgb2y" and fake.count("rate_interbank") == 3
+    assert rf.attrs["source"] == "cgb2y" and fake.count("rate_interbank") == 1
 
 
 def test_single_hanging_request_is_retried_after_request_timeout(hanging, monkeypatch, cache, sleeps):
