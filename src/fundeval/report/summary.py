@@ -727,7 +727,8 @@ def conclusion(report: EvaluationReport) -> str:
         ]
         if timing_text:
             reminder = ""
-            if any(res.gamma_t > -T_THRESHOLD for res in r.timing.values() if res is not None):
+            # 只有至少一个 γ 显著为正时才需要提醒非线性策略的替代解释
+            if any(res.gamma > 0 and res.gamma_t >= T_THRESHOLD for res in r.timing.values() if res is not None):
                 reminder = "γ 显著为正也可能来自期权类或动态风险控制等非线性策略，不能单凭 γ 认定择时能力。"
             sup.append("；".join(timing_text) + "。" + reminder)
         if r.robustness is not None and r.robustness.sensitive:

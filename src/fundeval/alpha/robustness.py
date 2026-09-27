@@ -7,7 +7,13 @@
 - CAPM：Alpha（截距）
 - TM、HM：择时 γ
 
-剔除后关键系数变号，或 |t| 跨过 1.96（由显著变为不显著或反之），即视为“结论对异常期敏感”。
+只有以下两种情形视为“结论对异常期敏感”：
+
+(a) |t| 跨过 1.96，即由显著变为不显著或反之（显著性结论改变）；
+(b) 系数变号，且剔除前或剔除后至少一边显著。
+
+剔除前后都不显著时，系数变号不改变“未显著偏离零”的结论，不算敏感，只在说明中注明符号有变化。
+剔除前后都显著且同号、只是幅度变化时，同样不算敏感。
 剔除只用于敏感性分析，不修改数据；异常期是否为数据错误须另行复核。剔除后序列不再连续，
 HAC 标准误按剩余观测的先后顺序计算，只作近似。
 """
@@ -32,10 +38,26 @@ KEY_COEFFICIENTS = {"CAPM": ("alpha", "CAPM Alpha"), "TM": ("gamma", "TM γ"), "
 _MODELS = {"CAPM": capm_regression, "TM": treynor_mazuy, "HM": henriksson_merton}
 
 
+def _significant(t: float) -> bool:
+    return abs(t) >= T_THRESHOLD
+
+
+def _sign_flipped(coef_a: float, coef_b: float) -> bool:
+    if not (np.isfinite(coef_a) and np.isfinite(coef_b)):
+        return False
+    return bool(np.sign(coef_a) != np.sign(coef_b))
+
+
 def _changed(coef_a: float, t_a: float, coef_b: float, t_b: float) -> bool:
+    """剔除前后关键系数的结论是否改变：|t| 跨过 1.96，或变号且至少一边显著。
+
+    两边都不显著时变号不算改变（结论都是“未显著偏离零”）。
+    """
     if not all(np.isfinite(v) for v in (coef_a, t_a, coef_b, t_b)):
         return False
-    return bool(np.sign(coef_a) != np.sign(coef_b) or (abs(t_a) >= T_THRESHOLD) != (abs(t_b) >= T_THRESHOLD))
+    crossed = _significant(t_a) != _significant(t_b)
+    flipped = _sign_flipped(coef_a, coef_b) and (_significant(t_a) or _significant(t_b))
+    return bool(crossed or flipped)
 
 
 def _fmt_dates(dates: pd.DatetimeIndex) -> str:
@@ -61,7 +83,10 @@ class ExclusionSensitivity:
         return len(self.excluded) > 0 and self.error is None
 
     def key_table(self) -> pd.DataFrame:
-        """关键系数对比：模型、系数、全样本估计与 t、剔除后估计与 t、是否改变显著性。"""
+        """关键系数对比：模型、系数、全样本估计与 t、剔除后估计与 t、是否变号、结论是否改变。
+
+        “结论改变”按模块说明的规则判定：|t| 跨过 1.96，或变号且至少一边显著。
+        """
         rows = []
         for model, (coef, label) in KEY_COEFFICIENTS.items():
             full = self.full.get(model)
@@ -81,7 +106,8 @@ class ExclusionSensitivity:
                     "剔除后估计": b,
                     "剔除后 t": tb,
                     "剔除后 n": trimmed.n if trimmed is not None else np.nan,
-                    "显著性或符号改变": "是" if _changed(a, ta, b, tb) else "否",
+                    "符号改变": "是" if _sign_flipped(a, b) else "否",
+                    "结论改变": "是" if _changed(a, ta, b, tb) else "否",
                 }
             )
         return pd.DataFrame(rows)
@@ -106,11 +132,11 @@ class ExclusionSensitivity:
 
     @property
     def changed(self) -> list[str]:
-        """关键系数变号或 |t| 跨过 1.96 的模型。"""
+        """关键系数结论改变的模型：|t| 跨过 1.96，或变号且至少一边显著。"""
         if not self.done:
             return []
         tbl = self.key_table()
-        return list(tbl.loc[tbl["显著性或符号改变"] == "是", "模型"])
+        return list(tbl.loc[tbl["结论改变"] == "是", "模型"])
 
     @property
     def sensitive(self) -> bool:
@@ -133,16 +159,24 @@ class ExclusionSensitivity:
             )
 
         if self.sensitive:
-            changed = tbl[tbl["显著性或符号改变"] == "是"]
+            changed = tbl[tbl["结论改变"] == "是"]
             return (
                 f"结论对 {n} 个异常期敏感（剔除 {dates}）："
                 + "；".join(t_text(row) for _, row in changed.iterrows())
                 + "。相关结论依赖少数极端期，须复核这些期的数据与成因。"
             )
+        flipped = tbl[tbl["符号改变"] == "是"]
+        tail = ""
+        if len(flipped):
+            tail = (
+                f"其中 {'、'.join(flipped['系数'])} 的符号有变化，但剔除前后均不显著（|t| < {T_THRESHOLD}），"
+                "“未显著偏离零”的结论不变。"
+            )
         return (
-            f"剔除 {n} 个异常期（{dates}）后，关键系数的符号与显著性不变："
+            f"剔除 {n} 个异常期（{dates}）后，关键系数的符号与显著性结论不变："
             + "；".join(t_text(row) for _, row in tbl.iterrows())
             + "。"
+            + tail
         )
 
 
