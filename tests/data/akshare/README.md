@@ -10,6 +10,10 @@
 | `fund_open_fund_info_em_110011_分红送配详情.csv` | `indicator="分红送配详情"`：年份、权益登记日、除息日、每份分红、分红发放日 |
 | `index_zh_a_hist_000300.csv` | `index_zh_a_hist(symbol="000300", period="daily", ...)` |
 | `stock_zh_index_hist_csindex_H11001.csv` | `stock_zh_index_hist_csindex(symbol="H11001", ...)` |
+| `stock_zh_index_hist_csindex_H00300.csv` | `stock_zh_index_hist_csindex(symbol="H00300", ...)`：沪深 300 全收益，在价格指数基础上每个交易日多约 0.8 个基点（模拟分红再投资） |
+| `stock_zh_index_hist_csindex_000300.csv` | `stock_zh_index_hist_csindex(symbol="000300", ...)`：收盘价与 `index_zh_a_hist_000300.csv` 相同，供东方财富失败时改用中证官网的测试 |
 | `bond_composite_index_cbond_财富_总值.csv` | `bond_composite_index_cbond(indicator="财富", period="总值")` |
 | `rate_interbank_Shibor人民币_3月.csv` | `rate_interbank(market="上海银行同业拆借市场", symbol="Shibor人民币", indicator="3月")` |
 | `bond_zh_us_rate.csv` | `bond_zh_us_rate(start_date=...)` |
+
+`tests/fake_akshare.py` 的 `FakeAkshare(fail={接口名: 异常})` 可让指定接口抛出网络异常（如 `ConnectionError`、`requests.exceptions.ChunkedEncodingError`），用于测试重试、数据源自动切换与旧缓存回退。

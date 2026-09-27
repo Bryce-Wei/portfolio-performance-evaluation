@@ -195,3 +195,80 @@ def test_to_excel_round_trip(report, tmp_path):
     assert periods["wealth"].iloc[-1] == pytest.approx(1.102058, abs=0.5e-6)
     quality = sheets["数据质量"]
     assert "期数" in set(quality["项目"])
+
+
+# ------------------------------ 对齐口径 ------------------------------
+
+
+def test_scope_reports_alignment_counts_and_dropped_periods(worked_example):
+    df = worked_example
+    b = df.benchmark.drop(df.index[[2, 3, 9]])
+    rep = evaluate(df.portfolio, b, 0.0015)
+    assert rep.scope["样本对齐"] == "组合 12 期、基准 9 期、共同 9 期"
+    dropped = [n for n in rep.notes if n.startswith("对齐时丢弃")]
+    assert dropped == ["对齐时丢弃组合不在共同日期内的 3 期：2025-03-31 至 2025-04-30（2 期）；2025-10-31"]
+    assert evaluate(df).scope["样本对齐"] == "组合 12 期、基准 12 期、共同 12 期"
+    assert not any(n.startswith("对齐时丢弃") for n in evaluate(df).notes)
+
+
+def test_evaluate_without_common_dates_raises(worked_example):
+    df = worked_example
+    shifted = df.benchmark.copy()
+    shifted.index = shifted.index - pd.Timedelta(days=3)  # 月末交易日与日历月末对不上
+    with pytest.raises(ValueError, match="没有共同日期"):
+        evaluate(df.portfolio, shifted, 0.0015)
+
+
+# ------------------------------ 显著性措辞区分方向 ------------------------------
+
+
+def test_significance_wording_by_sign():
+    from fundeval.report.summary import _significance
+
+    assert _significance(2.5).startswith("在大样本 5% 双侧口径下提供初步统计支持")
+    assert _significance(-2.5).startswith("显著为负，提示在所用模型下持续落后")
+    assert _significance(2.5, "gamma").startswith("在大样本 5% 双侧口径下提供初步统计支持")
+    assert _significance(-2.5, "gamma").startswith("显著为负，表现为负向凸性（上涨时市场敞口相对较低或下跌时相对较高），不支持择时能力")
+    for kind in ("alpha", "gamma"):
+        assert _significance(1.2, kind) == _significance(-1.2, kind) == "未显著偏离零（|t| < 1.96）"
+
+
+def _convex_sample(gamma, alpha, n=60, seed=7):
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2016-01-31", periods=n, freq="ME")
+    x = pd.Series(rng.normal(0.005, 0.045, n), index=idx)
+    y = alpha + 0.9 * x + gamma * x**2 + rng.normal(0, 0.002, n)
+    return y, x
+
+
+def test_conclusion_negative_alpha_and_negative_convexity():
+    p, b = _convex_sample(gamma=-8.0, alpha=-0.004)
+    rep = evaluate(p, b)
+    assert rep.metric("alpha_t") <= -1.96 and rep.timing["TM"].gamma_t <= -1.96 and rep.timing["HM"].gamma_t <= -1.96
+    sup = conclusion(rep).split("\n\n")[1]
+    assert "显著为负，提示在所用模型下持续落后" in sup
+    assert sup.count("显著为负，表现为负向凸性") == 2 and "不支持择时能力" in sup
+    assert "提供初步统计支持" not in sup and "γ 显著为正也可能来自" not in sup
+
+
+def test_conclusion_positive_alpha_and_positive_convexity():
+    p, b = _convex_sample(gamma=8.0, alpha=0.004)
+    rep = evaluate(p, b)
+    assert rep.metric("alpha_t") >= 1.96 and rep.timing["TM"].gamma_t >= 1.96
+    sup = conclusion(rep).split("\n\n")[1]
+    assert "提供初步统计支持" in sup and "γ 显著为正也可能来自期权类或动态风险控制等非线性策略" in sup
+    assert "显著为负" not in sup
+
+
+# ------------------------------ use_t 传到报告层 ------------------------------
+
+
+def test_use_t_is_passed_to_regressions(worked_example):
+    normal = evaluate(worked_example, hac_lags=2)
+    t_dist = evaluate(worked_example, hac_lags=2, use_t=True)
+    assert not normal.capm.use_t and t_dist.capm.use_t
+    assert all(res.use_t for res in t_dist.timing.values())
+    assert set(normal.regression_table()["标准误类型"]) == {"HAC（Newey–West，滞后 2，正态近似）"}
+    assert set(t_dist.regression_table()["标准误类型"]) == {"HAC（Newey–West，滞后 2，t 分布）"}
+    assert t_dist.metric("alpha_p") > normal.metric("alpha_p")  # t 分布尾部更厚，p 值更大
+    assert evaluate(worked_example).capm.use_t  # 普通 OLS 默认 t 分布

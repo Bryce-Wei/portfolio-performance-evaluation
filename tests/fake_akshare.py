@@ -1,4 +1,9 @@
-"""测试用的 akshare 替身：按接口签名返回 tests/data/akshare/ 中的样本，并记录调用。"""
+"""测试用的 akshare 替身：按接口签名返回 tests/data/akshare/ 中的样本，并记录调用。
+
+``fail`` 把接口名映射到要抛出的异常（实例或类），用于模拟上游请求中途断开，例如
+``FakeAkshare(fail={"index_zh_a_hist": ConnectionError("Remote end closed connection")})``；
+失败的调用同样记入 ``calls``，便于核对重试次数。
+"""
 
 import types
 from pathlib import Path
@@ -11,11 +16,14 @@ DATA = Path(__file__).parent / "data" / "akshare"
 class FakeAkshare(types.SimpleNamespace):
     """按接口签名返回样本，并记录调用次数。"""
 
-    def __init__(self):
-        super().__init__(__version__="fake", calls=[])
+    def __init__(self, fail=None):
+        super().__init__(__version__="fake", calls=[], fail=dict(fail or {}))
 
     def _log(self, name, **kwargs):
         self.calls.append((name, kwargs))
+        if name in self.fail:
+            exc = self.fail[name]
+            raise exc() if isinstance(exc, type) else exc
 
     def fund_open_fund_info_em(self, symbol="710001", indicator="单位净值走势", period="成立来"):
         self._log("fund_open_fund_info_em", symbol=symbol, indicator=indicator)

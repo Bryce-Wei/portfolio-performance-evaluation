@@ -31,8 +31,8 @@
 | 模块 | 对应章节 | 状态 |
 | --- | --- | --- |
 | `etl/`（schema、sources/files、clean、returns：单期收益与 to_frequency 频率转换） | 一 数据准备 | 已实现 |
-| `etl/sources/akshare.py`（基金单位净值加分红的总收益、指数行情、Shibor / 国债利率换算、本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
-| `etl/benchmark.py`（复合基准合成、合同基准文字解析）、`etl/quality.py`（数据质量报告、净值与日增长率交叉核对） | 一 数据准备 | 已实现 |
+| `etl/sources/akshare.py`（基金单位净值加分红的总收益、指数行情、Shibor / 国债利率换算、网络重试与数据源自动切换、带覆盖检查的本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
+| `etl/benchmark.py`（指数表与全收益代码、基准收益类型、复合基准合成、合同基准文字解析）、`etl/quality.py`（数据质量报告、净值与日增长率交叉核对） | 一 数据准备 | 已实现 |
 | `etl/sources` French 因子数据源 | 一 数据准备 | 待实现 |
 | `returns.py`（TWR、年化、MWR/XIRR、超额收益） | 二 收益衡量 | 已实现 |
 | `risk.py`（波动、回撤、Sharpe、IR、Treynor、M²） | 三 风险调整 | 已实现 |
@@ -58,20 +58,52 @@ pytest -m network                   # 本地运行联网冒烟测试（需安装
 ### 命令行
 
 ```bash
-# 经 akshare 取基金净值与分红、复合基准与 Shibor 3M，生成月度报告
+# 经 akshare 取基金净值与分红、复合基准与无风险利率，生成月度报告
 fundeval report --fund 110011 --benchmark "000300:0.8,H11001:0.2" \
-    --start 2021-01-01 --end 2025-12-31 --freq M --rf shibor3m --out report.md
+    --start 2021-01-01 --end 2025-12-31 --freq M --out report.md
 
-# 基准也可以写成合同文字，名称按 etl/benchmark.py 的 INDEX_CODES 换算为代码，表外名称报错
+# 基准也可以写成合同文字，名称按 etl/benchmark.py 的指数表换算为代码，表外名称报错
 fundeval report --fund 110011 --benchmark "沪深300指数收益率*80%+中债综合指数收益率*20%" \
     --start 2021-01-01 --end 2025-12-31 --out report.xlsx
+
+# 东方财富或 Shibor 接口不稳定时，直接指定中证指数官网与常数无风险利率
+fundeval report --fund 110020 --benchmark 000300 --index-source csindex --rf 0.018 \
+    --start 2021-01-01 --end 2025-12-31 --hac-lags 3 --use-t --out report.md
 
 # 本地 CSV / Excel，不依赖网络
 fundeval report --input tests/data/worked_example.csv \
     --columns "月份=date,组合收益=portfolio,基准收益=benchmark,无风险收益=risk_free" --out report.md
 ```
 
-`--rf` 可取 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y` 或常数年化利率（如 `0.018`），均按复利口径 (1 + y)^(1/K) − 1 换算为每期，并取期初已知的报价。`--input-freq D --freq M` 先把日度收益按期内复利合成为月度。给出 `--target-active`、`--target-te` 与 `--window` 时报告包含持续监控分区。原始数据默认缓存在 `~/.fundeval/cache`，可用 `--cache-dir`、`--no-cache`、`--refresh` 调整。
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--fund` / `--input` | 二选一 | 基金代码（经 akshare 取单位净值与分红）或本地收益表 |
+| `--benchmark` | 无 | `"000300:0.8,H11001:0.2"`（代码:权重）、单个代码或合同基准文字 |
+| `--index-return-type` | `total` | `total` 把基准成分换成全收益指数（000300 → H00300 等，见下节），没有全收益版本的成分沿用原代码并警告；`price` 使用价格指数，报告写明高估限定 |
+| `--index-source` | `auto` | `auto`：H 开头等中证代码走中证指数官网，纯数字代码先试东方财富、网络失败后改用中证官网；也可指定 `em` 或 `csindex` |
+| `--rf` | `auto` | `auto`：`--fund` 时按 Shibor 3M → 国债 2 年期依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y` 或常数年化利率（如 `0.018`） |
+| `--freq` / `--input-freq` | `M` / 同 `--freq` | 评价频率；`--input-freq D --freq M` 先把日度收益按期内复利合成为月度 |
+| `--hac-lags` / `--use-t` | 无 / 关 | Newey–West 标准误的滞后阶数；`--use-t` 让 HAC 的 p 值与置信区间也用 t 分布。月度样本不足 120 期且使用 HAC 时建议加 `--use-t`，否则正态近似会高估显著性 |
+| `--mar` | 无风险收益 | Sortino 的最低可接受收益（每期，小数） |
+| `--target-active` / `--target-te` / `--window` | 无 | 三者同时给出时报告包含持续监控分区 |
+| `--tolerance` | `0.0005` | 净值推算收益与日增长率交叉核对容差（5 个基点） |
+| `--fees` / `--title` | `费用后净值` / 自动 | 费用口径说明与报告标题 |
+| `--cache-dir` / `--no-cache` / `--refresh` | `~/.fundeval/cache` | 原始数据缓存目录、关闭缓存、强制重新拉取 |
+
+无风险利率均按复利口径 (1 + y)^(1/K) − 1 换算为每期，并取期初已知的报价。组合与基准的对齐由 `evaluate` 完成，报告口径写明“组合 N 期、基准 M 期、共同 K 期”，被丢弃的期列入附注。
+
+数据源与缓存：网络类异常（requests 异常、连接断开、超时）自动重试，共 3 次，指数退避；指数与无风险利率的自动切换都会发出警告，实际来源写入报告口径与附注。缓存命中时检查覆盖范围：数据最后日期早于截止日（或今天）之前最后一个工作日 7 天以上即重新拉取；不接受日期参数的接口（基金净值、Shibor、中债）与未给截止日的请求，缓存文件超过 1 天也会重新拉取（Python 中可用 `cache_lag_days`、`cache_max_age` 调整）。重新拉取失败时回退到旧缓存，但一定发出警告，并在报告附注中注明“使用 YYYY-MM-DD 的缓存数据”。网络失败导致无法出报告时，命令输出一行中文错误与替代办法，返回码 2。
+
+### 价格指数与全收益指数
+
+基金净值包含成分股分红，沪深 300（000300）等价格指数不含分红。用价格指数作基准，会把股息率计入基金的超额收益与 Alpha。在本地用 akshare 1.18.97 实测（2026-09-27）易方达沪深300ETF联接A（110020），2021-01 至 2025-12 月度：
+
+| 基准 | CAPM 年化 Alpha | t 值 |
+| --- | --- | --- |
+| 沪深 300 价格指数（000300） | +2.15% | 3.94 |
+| 沪深 300 全收益指数（H00300） | −0.18% | −1.07 |
+
+以价格指数为基准时，结论会写成“存在正截距的统计证据”；换成全收益指数后，Alpha 不再显著。这一差异全部来自成分股分红。因此 CLI 默认 `--index-return-type total`，把 000300、000905、000906、000852、000016 换成 H00300、H00905、H00906、H00852、H00016（经中证指数官网 `stock_zh_index_hist_csindex` 取数）。中债“财富”指数本身是全收益口径；H11001 等中证债券指数的口径在指数表中标为未知。基准含价格指数或未知类型成分时，报告在口径、附注与结论中都会写明“价格指数不含成分股分红，超额收益与 Alpha 会高估约为股息率的幅度”。在 Python 中可用 `fundeval.etl.benchmark.total_return_code("000300")` 查询全收益代码，用 `labels={"benchmark_return_type": ...}` 把收益类型传给 `evaluate`。
 
 ### Python 示例
 
@@ -101,7 +133,16 @@ res = capm_regression(df.portfolio, df.benchmark, df.risk_free, hac_lags=2, use_
 res.table(); res.annualized_alpha(12)  # 算术年化 α × K
 
 from fundeval.etl.sources import akshare as aks  # 需 pip install "fundeval[data]"
-fund, check = aks.fund_returns("110011", "2021-01-01", "2025-12-31", freq="M", return_check=True)
+from fundeval.etl.benchmark import benchmark_return_type, total_return_code
+with aks.collect_notes() as notes:  # 收集数据源自动切换与旧缓存回退的说明
+    fund, check = aks.fund_returns("110020", "2021-01-01", "2025-12-31", freq="M", return_check=True)
+    code = total_return_code("000300")  # "H00300"
+    bench = aks.index_returns(code, "2021-01-01", "2025-12-31", freq="M")
+    rf = aks.risk_free_returns("2021-01-01", "2025-12-31", "M", source="auto", index=fund.index)
+report = evaluate(
+    fund, bench, rf, cross_check=check, hac_lags=3, use_t=True, notes=notes,
+    labels={"benchmark_return_type": benchmark_return_type([code]), "risk_free": rf.attrs["description"]},
+)
 ```
 
 收益一律以小数表示（0.02 即 2%）。比率使用同频算术均值与样本标准差（n−1），乘以 √K 年化；分母为零时返回 NaN，表示不适用；缺失值只标记，不填零。基金总收益以单位净值加除息日分红计算，累计净值没有做分红再投资，不能直接当复权净值使用。`tests/test_worked_example.py` 用第九部分的演示数值作为基准测试，`evaluate` 在同一数据上给出一致的结果。

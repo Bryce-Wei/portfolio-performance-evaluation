@@ -23,6 +23,7 @@ from fundeval import returns as ret
 from fundeval.alpha.regression import RegressionResult, capm_regression
 from fundeval.attribution.timing import TimingResult, henriksson_merton, treynor_mazuy
 from fundeval.etl import clean, schema
+from fundeval.etl.benchmark import PRICE_INDEX_CAVEAT, needs_price_caveat
 from fundeval.etl.quality import QualityReport, data_quality_report
 
 #: 正文第十部分：样本少于 36 个月（3 年）时只能写“观察到模型未解释的收益”
@@ -94,6 +95,12 @@ class EvaluationReport:
     periods_per_year: int
     labels: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    benchmark_return_type: str | None = None
+
+    @property
+    def price_index_caveat(self) -> bool:
+        """基准为价格指数、含价格指数成分或收益类型未知，结论须写明价格指数的限定语。"""
+        return needs_price_caveat(self.benchmark_return_type)
 
     @property
     def n(self) -> int:
@@ -221,6 +228,37 @@ def _rf_description(risk_free, labels: Mapping[str, str]) -> str:
     return "逐期序列（调用方提供）"
 
 
+_PART_NAMES = {schema.PORTFOLIO: "组合", schema.BENCHMARK: "基准", schema.MARKET: "市场"}
+
+
+def _date_runs(index: pd.DatetimeIndex, dropped: pd.DatetimeIndex) -> list[str]:
+    """把被丢弃的日期按其在原序列中的连续位置分段，写成“起 至 止（n 期）”。"""
+    pos = np.sort(index.get_indexer(dropped))
+    runs, start = [], 0
+    for i in range(1, len(pos) + 1):
+        if i == len(pos) or pos[i] != pos[i - 1] + 1:
+            a, b = index[pos[start]], index[pos[i - 1]]
+            n = i - start
+            runs.append(f"{a:%Y-%m-%d}" if n == 1 else f"{a:%Y-%m-%d} 至 {b:%Y-%m-%d}（{n} 期）")
+            start = i
+    return runs
+
+
+def _alignment(raw_parts: Mapping[str, pd.Series], common: pd.DatetimeIndex) -> tuple[str, list[str]]:
+    """对齐口径（“组合 N 期、基准 M 期、共同 K 期”）与被丢弃期的附注。"""
+    counts = [f"{_PART_NAMES.get(k, k)} {len(v)} 期" for k, v in raw_parts.items()]
+    text = "、".join(counts) + f"、共同 {len(common)} 期"
+    notes = []
+    for key, series in raw_parts.items():
+        idx = pd.DatetimeIndex(series.index)
+        dropped = idx.difference(common)
+        if len(dropped):
+            notes.append(
+                f"对齐时丢弃{_PART_NAMES.get(key, key)}不在共同日期内的 {len(dropped)} 期：" + "；".join(_date_runs(idx, dropped))
+            )
+    return text, notes
+
+
 def _fmt_date(value) -> str:
     return value if isinstance(value, str) else f"{pd.Timestamp(value):%Y-%m-%d}"
 
@@ -238,6 +276,8 @@ def evaluate(
     labels: Mapping[str, str] | None = None,
     cross_check: pd.DataFrame | None = None,
     confidence: float = 0.95,
+    use_t: bool | None = None,
+    notes: list[str] | tuple[str, ...] | None = None,
 ) -> EvaluationReport:
     """生成评价报告（正文第九、十部分）。
 
@@ -252,13 +292,19 @@ def evaluate(
     hac_lags : 给出时回归使用 Newey–West 标准误
     monitor_targets : {"target_active_return": 年化目标主动收益, "target_te": 年化目标 TE,
         "window": 窗口期数}，给出时计算风险倍数、z 值与分区（阈值为正文演示值）
-    labels : {"title", "portfolio", "benchmark", "market", "risk_free", "fees", "benchmark_note"}，
-        用于口径说明；fees 缺省为“费用后净值”
+    labels : {"title", "portfolio", "benchmark", "market", "risk_free", "fees", "benchmark_note",
+        "benchmark_return_type", "benchmark_source"}，用于口径说明；fees 缺省为“费用后净值”；
+        benchmark_return_type 为“全收益”“价格指数”“含价格指数成分”或“未知”
+        （见 etl.benchmark.benchmark_return_type），后三者会在口径、附注与结论中写明
+        “价格指数不含成分股分红，超额收益与 Alpha 会高估约为股息率的幅度”
     cross_check : etl.quality.nav_growth_check 的结果，列入数据质量报告
     confidence : VaR / ES 置信水平
+    use_t : 传给 CAPM、TM、HM 回归；True 时 HAC 的 p 值与置信区间也用 t 分布（小样本建议）
+    notes : 调用方附加的说明（如数据源自动切换、使用旧缓存），写入附注
 
-    组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。数据质量报告按
-    日期并集统计缺失，因此两边日期不一致的情形会在报告中显示。
+    组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。口径中写明
+    “组合 N 期、基准 M 期、共同 K 期”，有期数被丢弃时在附注中列出其起止日期；
+    数据质量报告按日期并集统计缺失。
     """
     labels = dict(labels or {})
     k = int(periods_per_year)
@@ -272,13 +318,21 @@ def evaluate(
     outer = clean.align(*raw_parts.values(), how="outer", names=list(raw_parts))
     quality = data_quality_report(outer, cross_check=cross_check)
 
+    common = pd.DatetimeIndex(p_raw.index)
+    for part in raw_parts.values():
+        common = common.intersection(pd.DatetimeIndex(part.index))
+    if len(common) == 0:
+        counts = "、".join(f"{_PART_NAMES.get(k, k)} {len(v)} 期" for k, v in raw_parts.items())
+        raise ValueError(f"组合与基准（市场）没有共同日期（{counts}），请检查日期标签是否一致（如月末交易日与日历月末）")
+    alignment_text, alignment_notes = _alignment(raw_parts, common)
     df = clean.align_returns(p_raw, benchmark, risk_free if not np.isscalar(risk_free) else float(risk_free), market)
     p = df[schema.PORTFOLIO]
     rf = df[schema.RISK_FREE]
     b = df[schema.BENCHMARK] if benchmark is not None else None
     market_proxy = market is None and b is not None
     m = df[schema.MARKET] if market is not None else b
-    notes: list[str] = []
+    extra_notes = list(notes or [])
+    notes: list[str] = list(alignment_notes)
     metrics: list[Metric] = []
 
     def add(section, key, label, value, unit, note=""):
@@ -343,9 +397,9 @@ def evaluate(
     regression_error = None
     if m is not None:
         try:
-            capm = capm_regression(p, m, rf, hac_lags=hac_lags)
-            timing["TM"] = treynor_mazuy(p, m, rf, hac_lags=hac_lags)
-            timing["HM"] = henriksson_merton(p, m, rf, hac_lags=hac_lags)
+            capm = capm_regression(p, m, rf, hac_lags=hac_lags, use_t=use_t)
+            timing["TM"] = treynor_mazuy(p, m, rf, hac_lags=hac_lags, use_t=use_t)
+            timing["HM"] = henriksson_merton(p, m, rf, hac_lags=hac_lags, use_t=use_t)
         except ValueError as exc:
             regression_error = str(exc)
     if capm is not None:
@@ -405,10 +459,20 @@ def evaluate(
         "样本起": f"{df.index[0]:%Y-%m-%d}" if len(df) else "—",
         "样本止": f"{df.index[-1]:%Y-%m-%d}" if len(df) else "—",
         "期数": f"{len(df)}",
+        "样本对齐": alignment_text,
         "频率 K": f"{freq_name}，K = {k}",
         "组合": labels.get("portfolio", "组合"),
         "基准": labels.get("benchmark", "基准" if b is not None else "未提供"),
     }
+    benchmark_type = labels.get("benchmark_return_type") if b is not None else None
+    if b is not None:
+        type_text = benchmark_type or "未说明"
+        if needs_price_caveat(benchmark_type):
+            type_text += f"（{PRICE_INDEX_CAVEAT}）"
+            notes.append(f"基准收益类型为{benchmark_type}：{PRICE_INDEX_CAVEAT}；宜改用全收益指数复核。")
+        scope["基准收益类型"] = type_text
+    if b is not None and "benchmark_source" in labels:
+        scope["基准数据源"] = labels["benchmark_source"]
     if "benchmark_note" in labels:
         scope["基准说明"] = labels["benchmark_note"]
     scope["市场代理"] = labels.get("market", "市场") if market is not None else ("以基准代替" if b is not None else "未提供")
@@ -454,7 +518,8 @@ def evaluate(
         data=data,
         periods_per_year=k,
         labels=labels,
-        notes=notes,
+        notes=notes + extra_notes,
+        benchmark_return_type=benchmark_type,
     )
 
 
@@ -467,12 +532,28 @@ def _pct(x, digits: int = 2) -> str:
     return format_value(x, PCT, digits)
 
 
-def _significance(t: float) -> str:
+_THRESHOLD_NOTE = "|t| ≥ 1.96 只是参考，实际阈值须结合自由度与多重比较调整"
+
+
+def _significance(t: float, kind: str = "alpha") -> str:
+    """按 t 值的大小与方向给出措辞。``kind`` 为 "alpha"（截距）或 "gamma"（择时 γ）。
+
+    - 显著为正：在大样本 5% 双侧口径下提供初步统计支持
+    - 显著为负：Alpha 提示在所用模型下持续落后；γ 表现为负向凸性，不支持择时能力
+    - 不显著：未显著偏离零
+    """
     if not np.isfinite(t):
         return "无法判断显著性"
-    if abs(t) >= T_THRESHOLD:
-        return "在大样本 5% 双侧口径下提供初步统计支持（|t| ≥ 1.96 只是参考，实际阈值须结合自由度与多重比较调整）"
-    return "未显著偏离零（|t| < 1.96）"
+    if abs(t) < T_THRESHOLD:
+        return "未显著偏离零（|t| < 1.96）"
+    if t > 0:
+        return f"在大样本 5% 双侧口径下提供初步统计支持（{_THRESHOLD_NOTE}）"
+    if kind == "gamma":
+        return (
+            "显著为负，表现为负向凸性（上涨时市场敞口相对较低或下跌时相对较高），不支持择时能力"
+            f"（{_THRESHOLD_NOTE}）"
+        )
+    return f"显著为负，提示在所用模型下持续落后（{_THRESHOLD_NOTE}）"
 
 
 def _m2_gap(diff: float) -> str:
@@ -482,12 +563,20 @@ def _m2_gap(diff: float) -> str:
     return f"较基准年化算术均值{word} {format_value(abs(diff), PP)}"
 
 
+def _price_caveat_sentence(r: EvaluationReport) -> str:
+    return (
+        f"基准收益类型为“{r.benchmark_return_type}”：{PRICE_INDEX_CAVEAT}，"
+        "上述超额收益与 Alpha 不能直接解读为超额能力，宜改用全收益指数复核。"
+    )
+
+
 def conclusion(report: EvaluationReport) -> str:
     """按正文第十部分写出三段结论：观察到的表现、可以支持的解释、需要进一步验证的判断。
 
     措辞规则：样本少于 36 个月（或等价期数）时不作“管理能力”判断，只写“观察到模型
-    未解释的收益”；|t| ≥ 1.96 时写“在大样本 5% 双侧口径下提供初步统计支持”并注明阈值
-    须结合自由度与多重比较调整，否则写“未显著偏离零”；所有数值带单位与口径。
+    未解释的收益”；|t| ≥ 1.96 且为正时写“在大样本 5% 双侧口径下提供初步统计支持”并注明
+    阈值须结合自由度与多重比较调整，显著为负时按系数写明含义（见 _significance），否则写
+    “未显著偏离零”；基准含价格指数或类型未知时写明价格指数的限定语；所有数值带单位与口径。
     """
     r = report
     has = r.metrics.index.__contains__
@@ -545,18 +634,22 @@ def conclusion(report: EvaluationReport) -> str:
             sup.append("观察到模型未解释的收益，但统计上未显著偏离零。")
         else:
             sup.append("未观察到正的模型未解释收益。")
+        if r.price_index_caveat:
+            sup.append(_price_caveat_sentence(r))
         timing_text = [
-            f"{name} 择时 γ = {res.gamma:.3f}（t = {res.gamma_t:.2f}，{_se_label(res)}），{_significance(res.gamma_t)}"
+            f"{name} 择时 γ = {res.gamma:.3f}（t = {res.gamma_t:.2f}，{_se_label(res)}），{_significance(res.gamma_t, 'gamma')}"
             for key, name in (("TM", "Treynor–Mazuy"), ("HM", "Henriksson–Merton"))
             if (res := r.timing.get(key)) is not None
         ]
         if timing_text:
-            sup.append(
-                "；".join(timing_text)
-                + "。γ 显著为正也可能来自期权类或动态风险控制等非线性策略，不能单凭 γ 认定择时能力。"
-            )
+            reminder = ""
+            if any(res.gamma_t > -T_THRESHOLD for res in r.timing.values() if res is not None):
+                reminder = "γ 显著为正也可能来自期权类或动态风险控制等非线性策略，不能单凭 γ 认定择时能力。"
+            sup.append("；".join(timing_text) + "。" + reminder)
     else:
         sup.append("未做 CAPM 回归与择时检验（缺少基准或样本不足），无法区分收益来源。")
+        if r.price_index_caveat:
+            sup.append(_price_caveat_sentence(r))
         if r.short_sample:
             sup.append(f"样本较短（{r.n} 期，不足 {SHORT_SAMPLE_YEARS * 12} 个月），上述表现不足以支持能力判断。")
     if has("sortino"):

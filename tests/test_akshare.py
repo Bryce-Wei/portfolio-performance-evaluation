@@ -228,3 +228,20 @@ def test_network_smoke(tmp_path):
     assert len(aks.index_returns("cbond:composite", "2024-01-01", "2024-03-31", **kw)) > 40
     assert aks.risk_free_returns("2024-01-01", "2024-03-31", "M", source="shibor3m", **kw).notna().all()
     assert aks.risk_free_returns("2024-01-01", "2024-03-31", "M", source="cgb10y", **kw).notna().all()
+
+
+@pytest.mark.network
+def test_network_total_return_benchmark_removes_dividend_alpha(tmp_path):
+    """110020（易方达沪深300ETF联接A）对沪深 300 全收益指数：分红口径一致后 Alpha 接近零。"""
+    pytest.importorskip("akshare")
+    from fundeval.report import evaluate
+
+    kw = {"cache_dir": tmp_path}
+    start, end = "2021-01-01", "2025-12-31"
+    fund = aks.fund_returns("110020", start, end, freq="M", **kw)
+    bench = aks.index_returns("H00300", start, end, freq="M", **kw)
+    rf = aks.risk_free_returns(start, end, "M", source="auto", index=fund.index, **kw)
+    rep = evaluate(fund, bench, rf, periods_per_year=12)
+    assert rep.n >= 55
+    assert abs(rep.capm.annualized_alpha(12)) < 0.01
+    assert abs(rep.capm.alpha_t) < 2
