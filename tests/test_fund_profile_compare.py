@@ -255,7 +255,7 @@ def test_fund_report_resolution_failure_is_one_line_error(fake, tmp_path, capsys
 
 
 def test_fund_report_with_benchmark_map_notes_fx_and_qdii(fake, tmp_path):
-    code, text = _report(tmp_path, "--fund", "110011", *MAP_110011)
+    code, text = _report(tmp_path, "--fund", "110011", *MAP_110011, "--fx", "none")
     assert code == 0
     assert "| 基准币种 | 含非人民币成分：中证香港300指数（H11164，港元）；未做汇率换算，基准收益含汇率差异 |" in text
     notes = text.split("## 附注")[1].split("## 结论")[0]

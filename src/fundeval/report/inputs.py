@@ -15,11 +15,18 @@ from typing import Any
 import pandas as pd
 
 from fundeval.attribution.factor import FACTOR_DESCRIPTIONS, FACTOR_PRESETS, INDEX_PROXY, index_proxy_factors, preset_codes
+from fundeval.etl import fx as fx_mod
 from fundeval.etl import schema
 from fundeval.etl.benchmark import (
     CASH,
+    CNY,
+    FX_CAVEAT,
     RETURN_TYPE_LABELS,
+    STYLE_AUTO,
     STYLE_PRESETS,
+    auto_style_preset,
+    cbond_alternative_hint,
+    index_record,
     benchmark_return_type,
     composite_benchmark,
     index_return_type,
@@ -29,7 +36,7 @@ from fundeval.etl.benchmark import (
     total_return_code,
 )
 from fundeval.etl.quality import CROSS_CHECK_TOLERANCE
-from fundeval.etl.returns import period_code, period_end_index, to_frequency
+from fundeval.etl.returns import period_code, period_end_index, price_to_returns, to_frequency
 from fundeval.etl.sources import files
 from fundeval.etl.sources.akshare import DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT
 from fundeval.report.summary import DEFAULT_FEE_BASIS
@@ -113,16 +120,135 @@ def _format_parts(parts) -> str:
     return "、".join(f"{code}×{weight:.0%}" if len(parts) > 1 else code for code, weight in parts)
 
 
-def _benchmark_from_akshare(spec, start, end, freq, cache, *, return_type="total", source="auto"):
-    """联网取基准成分并合成，返回 (基准收益, labels 补充, 附注)。"""
+#: 汇率取数失败时的替代办法
+FX_NONE_HINT = "可用 --fx none 不做汇率换算（口径将注明“未做汇率换算，基准收益含汇率差异”）"
+
+#: 汇率中间价向前多取的自然日数，保证价格序列首日之前有中间价可取（asof）
+_FX_LOOKBACK_DAYS = 15
+
+
+def _is_foreign(currency) -> bool:
+    return currency not in (CNY, "", None)
+
+
+def _fx_converted_returns(code, currency, start, end, freq, cache, *, source="auto") -> pd.Series:
+    """外币指数的人民币收益：日度价格 → 日度外币收益 → 按人民币汇率中间价换算（etl.fx.convert_returns，
+    asof 取不晚于当日的最近一个中间价）→ 截取区间 → 合成为 freq。
+
+    汇率取数失败或无法对应币种时报错，并提示可用 --fx none，不静默跳过。
+    """
     from fundeval.etl.sources import akshare as aks
 
+    price = aks.index_prices(code, start, end, source=source, **cache)
+    if len(price) < 2:
+        raise ValueError(f"指数 {code} 在区间内的收盘价不足两个交易日，无法计算收益")
+    local = price_to_returns(price).rename(code)
+    rates_start = price.index[0] - pd.Timedelta(days=_FX_LOOKBACK_DAYS)
+    try:
+        rates = aks.fx_rates(currency, rates_start, end, **cache)
+    except Exception as exc:
+        if aks.is_network_error(exc):
+            raise aks.DataSourceUnavailable(
+                f"{fx_mod.FX_SOURCE_LABEL}（{currency}）取数失败（{aks._describe_error(exc)}），"
+                f"基准成分 {code} 无法换算为人民币收益；{FX_NONE_HINT}"
+            ) from exc
+        raise ValueError(f"基准成分 {code} 无法换算为人民币收益：{exc}；{FX_NONE_HINT}") from exc
+    daily = fx_mod.convert_returns(local, rates, base_date=price.index[0])
+    daily = daily.loc[pd.Timestamp(start) if start is not None else None : pd.Timestamp(end) if end is not None else None]
+    if daily.isna().any():
+        first = daily.index[daily.isna()][0]
+        raise ValueError(
+            f"基准成分 {code} 在 {first:%Y-%m-%d} 及之前没有{currency}的{fx_mod.FX_SOURCE_LABEL}，无法换算；{FX_NONE_HINT}"
+        )
+    out = to_frequency(daily, freq).rename(code) if freq != "D" else daily
+    label = price.attrs.get("source_label", "未知")
+    out.attrs = {**price.attrs, "source_label": f"{label}，按{fx_mod.FX_SOURCE_LABEL}（{currency}）换算为人民币"}
+    return out
+
+
+def _component_returns(code, start, end, freq, cache, *, source="auto", currency=None, fx="convert", name=None):
+    """取一个指数成分的每期收益（去掉首末不完整的期）。
+
+    - 币种不是人民币且 ``fx="convert"`` 时按 _fx_converted_returns 换算为人民币收益
+    - 中债成分（``cbond:``）遇网络类异常时，在错误信息后补充 --benchmark-map 替代提示（不自动替换）
+    """
+    from fundeval.etl.sources import akshare as aks
+
+    try:
+        if fx == fx_mod.FX_CONVERT and _is_foreign(currency):
+            r = _fx_converted_returns(code, currency, start, end, freq, cache, source=source)
+        else:
+            r = aks.index_returns(code, start, end, source=source, freq=None if freq == "D" else freq, **cache)
+    except Exception as exc:
+        if str(code).startswith("cbond:") and aks.is_network_error(exc):
+            raise aks.DataSourceUnavailable(
+                f"基准成分“{name or code}”（{code}）取数失败：{aks._describe_error(exc)}。{cbond_alternative_hint(name or code)}"
+            ) from exc
+        raise
+    return _trim_partial(r, freq, start, end)
+
+
+def _currency_texts(foreign, fx: str, k: int) -> tuple[str, list[str]]:
+    """非人民币成分的口径文字与附注。foreign 为 [(名称, 代码, 币种), ...]。"""
+    listed = "、".join(f"{name}（{code}，{cur}）" for name, code, cur in foreign)
+    if fx == fx_mod.FX_CONVERT:
+        caveat = fx_mod.converted_caveat(cur for _, _, cur in foreign)
+        note = (
+            f"基准含非人民币成分 {listed}：{caveat}。先在日度上按 r_CNY = (1 + r_外币) × S_t / S_t−1 − 1 换算"
+            "（S 为每单位外币折合人民币，指数交易日取不晚于当日的最近一个中间价，不用未来数据），"
+            f"再按期内复利合成为每期收益（K = {k}）。"
+        )
+        return f"含非人民币成分：{listed}；{caveat}", [note]
+    return f"含非人民币成分：{listed}；{FX_CAVEAT}", [f"基准含非人民币成分 {listed}：{FX_CAVEAT}（--fx none）。"]
+
+
+def _catalog_loader(cache: dict):
+    """返回按需获取中证指数目录的无参函数（只取一次）。"""
+    from fundeval.etl.sources import akshare as aks
+
+    holder: dict[str, pd.DataFrame] = {}
+
+    def catalog() -> pd.DataFrame:
+        if "df" not in holder:
+            holder["df"] = aks.index_catalog(**_cache_kwargs(cache))
+        return holder["df"]
+
+    return catalog
+
+
+def _code_currency(code: str, catalog) -> tuple[str | None, str | None]:
+    """指数代码的币种：指数表与中债代码为人民币；其余在中证指数目录中查“指数币种”。
+    返回 (币种, 附注)；目录取不到或查无此代码时币种为 None，附注写明未能确认。"""
+    if index_record(code) is not None or code.startswith("cbond:"):
+        return CNY, None
+    try:
+        frame = catalog()
+    except Exception as exc:
+        msg = f"基准成分 {code} 的币种未能确认（中证指数目录获取失败：{type(exc).__name__}），按人民币计价处理，未做汇率换算"
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+        return None, msg
+    rows = frame[frame["指数代码"] == code]
+    if rows.empty:
+        return None, f"基准成分 {code} 不在中证指数目录中，币种未能确认，按人民币计价处理，未做汇率换算"
+    return str(rows.iloc[0]["指数币种"]) or None, None
+
+
+def _benchmark_from_akshare(spec, start, end, freq, cache, *, return_type="total", source="auto", fx="convert"):
+    """联网取基准成分并合成，返回 (基准收益, labels 补充, 附注)。
+
+    指数表以外的代码在中证指数目录中查币种（需要时才联网获取目录）；非人民币成分按 ``fx`` 换算或注明未换算。
+    """
     parts = parse_benchmark_spec(spec)
     codes, notes = resolve_benchmark_codes(parts, return_type)
-    comps = {
-        code: aks.index_returns(code, start, end, source=source, freq=None if freq == "D" else freq, **cache)
-        for code, _ in codes
-    }
+    catalog = _catalog_loader(cache)
+    comps, foreign = {}, []
+    for code, _ in codes:
+        currency, note = _code_currency(code, catalog)
+        if note:
+            notes.append(note)
+        if _is_foreign(currency):
+            foreign.append((code, code, currency))
+        comps[code] = _component_returns(code, start, end, freq, cache, source=source, currency=currency, fx=fx)
     bench = composite_benchmark(comps, {code: w for code, w in codes})
     label = spec if codes == parts else f"{spec}（实际使用 {_format_parts(codes)}）"
     labels = {
@@ -130,13 +256,19 @@ def _benchmark_from_akshare(spec, start, end, freq, cache, *, return_type="total
         "benchmark_return_type": benchmark_return_type([c for c, _ in codes]),
         "benchmark_source": "；".join(f"{code}：{r.attrs.get('source_label', '未知')}" for code, r in comps.items()),
     }
+    if foreign:
+        labels["benchmark_currency"], fx_notes = _currency_texts(foreign, fx, schema.periods_per_year(freq))
+        notes += fx_notes
     return bench, labels, notes
 
 
 def parse_style_spec(spec: str) -> dict[str, str]:
     """解析 --style：预设名（如 ``cn_equity``，见 etl.benchmark.style_preset）或逗号分隔的代码列表
-    （``cash`` 表示无风险收益）。返回 {列名: 代码}；代码列表的列名即代码本身。"""
+    （``cash`` 表示无风险收益）。返回 {列名: 代码}；代码列表的列名即代码本身。
+    ``auto`` 须先按基金类型换成预设名（etl.benchmark.auto_style_preset，build_report_inputs 中完成）。"""
     spec = spec.strip()
+    if spec.lower() == STYLE_AUTO:
+        raise ValueError("--style auto 须先按基金类型选择预设（需要 --fund）")
     if spec in STYLE_PRESETS:
         return style_preset(spec)
     codes = [c.strip() for c in spec.replace("，", ",").split(",")]
@@ -233,31 +365,27 @@ def _cache_kwargs(cache: dict) -> dict:
 
 
 def _benchmark_from_contract(profile, start, end, freq, cache, index, *, return_type="total", source="auto",
-                             overrides=None, deposit_rate=None, time_deposit_rate=None):
+                             overrides=None, deposit_rate=None, time_deposit_rate=None, fx="convert"):
     """按基金合同业绩比较基准合成复合基准，返回 (基准收益, labels 补充, 附注, 解析结果表)。
 
     成分按 etl.benchmark.resolve_benchmark 解析（指数目录 index_catalog 只在需要时联网获取）；
     指数成分经 akshare 取收益，现金成分按常数年化利率以 (1 + y)^(1/K) − 1 换算为每期，每期再平衡合成。
+    非人民币成分在 ``fx="convert"``（默认）时按人民币汇率中间价换算为人民币收益（etl.fx），
+    ``fx="none"`` 时沿用原币收益并注明“未做汇率换算”。中债成分取数失败时，错误信息补充
+    --benchmark-map 的替代提示（etl.benchmark.cbond_alternative_hint），不自动替换。
     """
     from fundeval.etl import benchmark as bm
-    from fundeval.etl.sources import akshare as aks
 
     text = profile.benchmark_text
     if not text:
         raise ValueError(f"基金 {profile.code} 的概况中没有业绩比较基准，请用 --benchmark 指定")
-    holder: dict[str, pd.DataFrame] = {}
-
-    def catalog() -> pd.DataFrame:
-        if "df" not in holder:
-            holder["df"] = aks.index_catalog(**_cache_kwargs(cache))
-        return holder["df"]
-
+    catalog = _catalog_loader(cache)
     rates = {}
     if deposit_rate is not None:
         rates["deposit_rate"] = float(deposit_rate)
     if time_deposit_rate is not None:
         rates["time_deposit_rate"] = float(time_deposit_rate)
-    comps = bm.resolve_benchmark(text, catalog, overrides, return_type=return_type, **rates)
+    comps = bm.resolve_benchmark(text, catalog, overrides, return_type=return_type, fx=fx, **rates)
     k = schema.periods_per_year(freq)
     series: dict[str, pd.Series] = {}
     used_sources: dict[str, str] = {}
@@ -265,8 +393,8 @@ def _benchmark_from_contract(profile, start, end, freq, cache, index, *, return_
         if c.is_cash:
             continue
         src = source if c.source in ("em", "csindex") else "auto"
-        r = aks.index_returns(c.code, start, end, source=src, freq=None if freq == "D" else freq, **cache)
-        series[c.name] = _trim_partial(r, freq, start, end)
+        r = _component_returns(c.code, start, end, freq, cache, source=src, currency=c.currency, fx=fx, name=c.name)
+        series[c.name] = r
         used_sources[c.name] = r.attrs.get("source_label", "未知")
     common = None
     for r in series.values():
@@ -293,11 +421,10 @@ def _benchmark_from_contract(profile, start, end, freq, cache, index, *, return_
     for c in comps:
         if c.is_cash:
             notes.append(f"基准成分“{c.name}”按{c.note}，以 (1 + y)^(1/{k}) − 1 换算为每期收益。")
-    foreign = [c for c in comps if c.currency not in (bm.CNY, "")]
+    foreign = [(c.name, c.code, c.currency) for c in comps if _is_foreign(c.currency)]
     if foreign:
-        text_fx = "、".join(f"{c.name}（{c.code}，{c.currency}）" for c in foreign)
-        labels["benchmark_currency"] = f"含非人民币成分：{text_fx}；{bm.FX_CAVEAT}"
-        notes.append(f"合同基准含非人民币成分 {text_fx}：{bm.FX_CAVEAT}。")
+        labels["benchmark_currency"], fx_notes = _currency_texts(foreign, fx, k)
+        notes += fx_notes
     return bench, labels, notes, table
 
 
@@ -321,6 +448,7 @@ class ReportOptions:
     time_deposit_rate: float | None = None
     index_return_type: str = "total"
     index_source: str = "auto"
+    fx: str = fx_mod.FX_CONVERT
     start: Any = None
     end: Any = None
     freq: str = "M"
@@ -391,6 +519,10 @@ def build_report_inputs(opts) -> dict:
     给出 ``fund`` 而未给 ``benchmark`` 时，基准默认为 ``contract``：取基金概况中的合同业绩比较基准，
     按 etl.benchmark.resolve_benchmark 解析（``benchmark_map`` 为调用方指定的 {名称: 代码}），
     沿用 ``index_return_type`` 换全收益指数，合成复合基准；解析结果表与基金概况写入报告口径。
+
+    ``fx``（默认 convert）：非人民币基准成分按国家外汇管理局人民币汇率中间价换算为人民币收益；none 时不换算，
+    口径注明“未做汇率换算”。``style="auto"`` 按基金概况的基金类型选择风格预设（etl.benchmark.auto_style_preset），
+    选择依据写入口径“风格预设”与附注。
     """
     if not isinstance(opts, ReportOptions):
         opts = ReportOptions.from_namespace(opts)
@@ -402,6 +534,10 @@ def build_report_inputs(opts) -> dict:
     for flag, value in (("--deposit-rate", opts.deposit_rate), ("--time-deposit-rate", opts.time_deposit_rate)):
         if value is not None and not 0 <= value < 0.2:
             raise ValueError(f"{flag} 为年化小数（0.35% 写作 0.0035），收到 {value}")
+    fx = fx_mod.check_mode(opts.fx)
+    style_auto = bool(opts.style) and opts.style.strip().lower() == STYLE_AUTO
+    if style_auto and not opts.fund:
+        raise ValueError("--style auto 须与 --fund 一起使用（按基金概况中的基金类型选择风格预设）")
     cache = opts.cache()
     labels = {"fees": opts.fees}
     if opts.title:
@@ -427,7 +563,9 @@ def build_report_inputs(opts) -> dict:
     if opts.fund:
         from fundeval.etl.sources import akshare as aks
 
-        profile = opts.profile or fund_profile_or_none(opts.fund, cache, required=benchmark_spec == CONTRACT)
+        profile = opts.profile or fund_profile_or_none(
+            opts.fund, cache, required=benchmark_spec == CONTRACT or style_auto
+        )
         portfolio, cross_check = aks.fund_returns(
             opts.fund, opts.start, opts.end, freq=None if freq == "D" else freq,
             tolerance=opts.tolerance, return_check=True, **cache,
@@ -438,10 +576,12 @@ def build_report_inputs(opts) -> dict:
         if benchmark_spec == CONTRACT:
             benchmark, extra, bench_notes, components = _benchmark_from_contract(
                 profile, opts.start, opts.end, freq, cache, portfolio.index, overrides=overrides,
-                deposit_rate=opts.deposit_rate, time_deposit_rate=opts.time_deposit_rate, **bench_kw,
+                deposit_rate=opts.deposit_rate, time_deposit_rate=opts.time_deposit_rate, fx=fx, **bench_kw,
             )
         else:
-            benchmark, extra, bench_notes = _benchmark_from_akshare(benchmark_spec, opts.start, opts.end, freq, cache, **bench_kw)
+            benchmark, extra, bench_notes = _benchmark_from_akshare(
+                benchmark_spec, opts.start, opts.end, freq, cache, fx=fx, **bench_kw
+            )
         labels.update(extra)
         notes += bench_notes
         benchmark = _trim_partial(benchmark, freq, opts.start, opts.end)
@@ -459,7 +599,9 @@ def build_report_inputs(opts) -> dict:
         if benchmark_spec:
             if benchmark is not None:
                 raise ValueError("输入文件已含 benchmark 列，不能再用 --benchmark 联网获取")
-            benchmark, extra, bench_notes = _benchmark_from_akshare(benchmark_spec, opts.start, opts.end, freq, cache, **bench_kw)
+            benchmark, extra, bench_notes = _benchmark_from_akshare(
+                benchmark_spec, opts.start, opts.end, freq, cache, fx=fx, **bench_kw
+            )
             labels.update(extra)
             notes += bench_notes
         elif benchmark is not None:
@@ -495,8 +637,15 @@ def build_report_inputs(opts) -> dict:
     if opts.style_window is not None and not opts.style:
         raise ValueError("--style-window 须与 --style 一起给出")
     if opts.style:
+        style_spec = opts.style
+        if style_auto:
+            if profile is None:  # pragma: no cover - required=True 时取不到概况会直接报错
+                raise ValueError("--style auto 需要基金概况中的基金类型")
+            style_spec, basis = auto_style_preset(profile.fund_type)
+            labels["style_preset"] = f"{style_spec}（--style auto：{basis}）"
+            notes.append(f"风格预设按基金类型自动选择：{basis}。")
         style_returns, style_labels, style_notes = _style_from_akshare(
-            opts.style, opts.start, opts.end, freq, cache, risk_free, portfolio.index, **bench_kw
+            style_spec, opts.start, opts.end, freq, cache, risk_free, portfolio.index, **bench_kw
         )
         labels.update(style_labels)
         notes += style_notes

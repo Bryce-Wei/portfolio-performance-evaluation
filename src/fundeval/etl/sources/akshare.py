@@ -17,6 +17,9 @@ akshare 是可选依赖，按需延迟导入；未安装时报错并提示 ``pip
   销售服务费率、最高认购费率、业绩比较基准、跟踪标的），已用真实返回核对（2026-09-27）
 - 指数目录：``index_csindex_all()`` 返回中证指数官网的指数全表（约 2370 行：指数代码、指数简称、指数全称、
   指数币种等），不含全收益指数（如 H00300），已用真实返回核对（2026-09-27）
+- 汇率：``currency_boc_safe()`` 返回 日期 与各币种列（美元、欧元、日元、港元、英镑、澳元、新西兰元、新加坡元、
+  瑞士法郎……共 26 列，约 8000 行全历史），数值为人民币汇率中间价，即每 100 外币折合的人民币元数
+  （国家外汇管理局），已用真实返回核对（2026-09-27：港元 2021-01-04 为 84.363，2025-12-31 为 90.322）
 - 利率：``rate_interbank(market, symbol, indicator)`` 返回 报告日、利率（%）、涨跌（Shibor 各期限）；
   ``bond_zh_us_rate(start_date)`` 返回 日期、中国国债收益率2年 / 5年 / 10年 / 30年（%）等
 
@@ -157,9 +160,19 @@ INDEX_CATALOG = {
     "currency": "指数币种",
 }
 
-#: 基金概况与指数目录的缓存有效期
+#: 人民币汇率中间价（国家外汇管理局）：列名即币种（与 index_csindex_all 的“指数币种”写法一致，如“港元”“美元”），
+#: 数值为每 ``per`` 单位外币折合的人民币元数
+FX_BOC = {
+    "func": "currency_boc_safe",
+    "date": "日期",
+    "per": 100,
+    "label": "国家外汇管理局人民币汇率中间价",
+}
+
+#: 基金概况、指数目录与汇率中间价的缓存有效期
 PROFILE_MAX_AGE = pd.Timedelta(days=1)
 CATALOG_MAX_AGE = pd.Timedelta(days=7)
+FX_MAX_AGE = pd.Timedelta(days=1)
 
 #: 无风险利率来源。rate 列为年化百分数。
 RATE_SOURCES = {
@@ -1044,6 +1057,50 @@ def index_returns(
     out = to_frequency(r, freq).rename(code) if freq else r
     out.attrs = dict(price.attrs)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 汇率
+# ---------------------------------------------------------------------------
+
+
+def fx_rates(
+    currency: str,
+    start=None,
+    end=None,
+    *,
+    cache_dir=None,
+    use_cache: bool = True,
+    refresh: bool = False,
+    cache_lag_days: int = CACHE_LAG_DAYS,
+    cache_max_age=FX_MAX_AGE,
+    timeout: float | None = DEFAULT_TIMEOUT,
+    total_timeout: float | None = DEFAULT_TOTAL_TIMEOUT,
+) -> pd.Series:
+    """每单位外币折合人民币的日度序列（国家外汇管理局人民币汇率中间价 ÷ 100），供 etl.fx 换算外币指数收益。
+
+    ``currency`` 取 index_csindex_all 的“指数币种”写法（如“港元”“美元”），与 ``currency_boc_safe()``
+    的列名逐字对应；没有该列时报错（列出可选币种），不做猜测。接口不接受日期参数、总是返回全历史，
+    缓存不按日期分键，有效期默认 1 天（FX_MAX_AGE），另按 ``end`` 检查覆盖范围。
+
+    该币种当日未发布中间价（空值）的日期不列入结果，由调用方按“不晚于该日的最近一个中间价”取值
+    （etl.fx.fx_asof），不填补。结果以币种命名，``attrs`` 记录数据源说明。
+    """
+    currency = str(currency).strip()
+    spec = FX_BOC
+    cache = _cache_opts(cache_dir, use_cache, refresh, cache_lag_days, cache_max_age, timeout, total_timeout)
+    raw = _call(spec, "all", None, None, cache, date_col=spec["date"], coverage_end=end, dated=False)
+    _require_columns(raw, [spec["date"]], spec["func"])
+    if currency not in raw.columns:
+        options = [str(c) for c in raw.columns if c != spec["date"]]
+        raise ValueError(
+            f"{spec['label']}（{spec['func']}）中没有“{currency}”列，无法换算（可选币种：{'、'.join(options)}）；"
+            "币种写法须与中证指数目录的“指数币种”一致，不做猜测"
+        )
+    s = (_series(raw, spec["date"], currency, currency) / spec["per"]).dropna()
+    s = _slice(s, start, end)
+    s.attrs.update(source_label=spec["label"], currency=currency)
+    return s
 
 
 # ---------------------------------------------------------------------------

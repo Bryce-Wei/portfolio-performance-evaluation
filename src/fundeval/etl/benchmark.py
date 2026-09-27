@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from fundeval.etl import fx as fx_mod
 from fundeval.etl import schema
 
 #: 权重加总的容差
@@ -165,6 +166,43 @@ STYLE_PRESETS: dict[str, dict[str, str]] = {
 STYLE_PRESETS["cn_balanced"] = {**STYLE_PRESETS["cn_equity"], "中证全债": "H11001"}
 
 
+#: --style auto：按基金类型（fund_profile 的“基金类型”）选择风格预设的关键词规则，按顺序先命中者为准。
+#: 先查具体的限定词（偏股、偏债），再查宽泛的类别词（债券、FOF、混合、股票），否则“QDII-混合偏股”
+#: 会先命中“混合”，偏股基金永远选不到 cn_equity。都不含时用 STYLE_AUTO_DEFAULT。
+STYLE_AUTO_RULES: tuple[tuple[str, str], ...] = (
+    ("偏股", "cn_equity"),
+    ("偏债", "cn_balanced"),
+    ("债券", "cn_balanced"),
+    ("FOF", "cn_balanced"),
+    ("混合", "cn_balanced"),
+    ("股票", "cn_equity"),
+)
+STYLE_AUTO_DEFAULT = "cn_balanced"
+#: --style 的自动选择写法
+STYLE_AUTO = "auto"
+
+_PRESET_TEXT = {"cn_equity": "cn_equity（不含债券指数）", "cn_balanced": "cn_balanced（含中证全债 H11001）"}
+
+
+def auto_style_preset(fund_type: str | None) -> tuple[str, str]:
+    """按基金类型选择风格预设（正文第五部分第 1 节：风格基准须覆盖基金可投资的资产类别），返回 (预设名, 选择依据)。
+
+    按 STYLE_AUTO_RULES 的顺序匹配关键词（FOF 不区分大小写）：偏股 → cn_equity，偏债、债券、FOF、混合 →
+    cn_balanced，股票（含“指数型-股票”）→ cn_equity；都不含或类型缺失时用 cn_balanced 并写明无法判断。
+    例如“QDII-混合偏股”含“偏股”→ cn_equity，“混合型-灵活”含“混合”→ cn_balanced。
+    债券仓位较多的基金若用 cn_equity，债券收益只能落到现金上（000001 华夏成长混合实测现金权重约 30%）。
+    """
+    text = (fund_type or "").strip()
+    for keyword, preset in STYLE_AUTO_RULES:
+        if keyword.upper() in text.upper():
+            return preset, f"基金类型“{text}”含“{keyword}”，选用 {_PRESET_TEXT[preset]}"
+    keywords = "、".join(k for k, _ in STYLE_AUTO_RULES)
+    shown = f"“{text}”" if text else "未知"
+    return STYLE_AUTO_DEFAULT, (
+        f"基金类型{shown}不含 {keywords} 等关键词，无法判断，按默认选用 {_PRESET_TEXT[STYLE_AUTO_DEFAULT]}"
+    )
+
+
 def style_preset(name: str) -> dict[str, str]:
     """风格指数预设，返回 {列名: 指数代码} 的副本；``cash`` 表示以无风险收益作现金资产。
 
@@ -251,8 +289,22 @@ DEPOSIT_RATE_SOURCE = "中国人民银行存款基准利率，2015-10-24 起未�
 #: 人民币币种的写法（index_csindex_all 的“指数币种”）
 CNY = "人民币"
 
-#: 非人民币成分的限定语，写入口径与附注
+#: 非人民币成分的限定语（--fx none），写入口径与附注
 FX_CAVEAT = "未做汇率换算，基准收益含汇率差异"
+
+#: 中债成分取数失败时的替代提示（中债网站 yield.chinabond.com.cn 在部分网络环境下无法连接）。不自动替换
+CBOND_ALTERNATIVE_EXAMPLE = "H11001"
+
+
+def cbond_alternative_hint(name: str) -> str:
+    """中债成分取数失败时补充的提示：可用 --benchmark-map 显式指定中证官网可取的债券指数作为替代。"""
+    shown = _clean_name(name).removesuffix("指数")
+    return (
+        f"中债网站（yield.chinabond.com.cn）在部分网络环境下无法连接；可用 --benchmark-map 显式指定中证指数官网"
+        f"可取的债券指数作为替代，例如 --benchmark-map \"{shown}={CBOND_ALTERNATIVE_EXAMPLE}\"（中证全债）。"
+        "这会改变基准口径（指数编制方与样本不同，H11001 的收益类型未经核实），报告会在基准解析中注明“调用方指定”；"
+        "本工具不会自动替换"
+    )
 
 #: 名称有歧义、不自动映射的成分：{规范化名称: 说明}
 AMBIGUOUS_NAMES = {
@@ -386,6 +438,7 @@ def resolve_component(
     return_type: str = TOTAL,
     deposit_rate: float = DEMAND_DEPOSIT_RATE,
     time_deposit_rate: float = TIME_DEPOSIT_RATE,
+    fx: str = "none",
 ) -> ResolvedComponent:
     """把合同基准中的一个成分名称解析为代码、收益类型、数据源、币种与说明（正文第一部分“基准选择”）。
 
@@ -402,11 +455,14 @@ def resolve_component(
         后缀后，与“指数简称”“指数全称”精确比较，恰好匹配一条才采用；收益类型记为 unknown
         （除非指数表中有全收益映射），币种取“指数币种”
 
-    币种不是人民币时发出 RuntimeWarning，说明中写明“未做汇率换算，基准收益含汇率差异”。
+    币种不是人民币时：``fx="none"``（默认，本函数只解析、不取数）发出 RuntimeWarning，说明中写明
+    “未做汇率换算，基准收益含汇率差异”；``fx="convert"`` 表示调用方会按人民币汇率中间价换算
+    （report.inputs 用 etl.fx），说明中写明换算口径，不发警告。
     无法解析时抛出 BenchmarkResolutionError，写明原因与候选，不做猜测。
     """
     if return_type not in (TOTAL, PRICE):
         raise ValueError(f"return_type 须为 'total' 或 'price'，收到 {return_type!r}")
+    fx_mod.check_mode(fx)
     display = _clean_name(name)
     norm = normalize_component_name(name)
 
@@ -428,7 +484,7 @@ def resolve_component(
         comp = _code_component(display, code, "override", PRICE, "调用方指定")
         if index_record(code) is None and not code.startswith("cbond:") and catalog is not None:
             comp = _with_catalog_currency(comp, _catalog_frame(catalog))
-        return _check_currency(comp)
+        return _check_currency(comp, fx)
     # (b) 现金类
     kind = _cash_kind(norm)
     if kind is not None:
@@ -472,7 +528,7 @@ def resolve_component(
             display, code, UNKNOWN, "csindex", CNY, "catalog",
             f"{row['指数简称']}（{row['指数全称']}），收益类型未经核实，按价格指数的限定语处理",
         )
-    return _check_currency(_with_catalog_currency(comp, frame))
+    return _check_currency(_with_catalog_currency(comp, frame), fx)
 
 
 def _with_catalog_currency(comp: ResolvedComponent, catalog: pd.DataFrame | None) -> ResolvedComponent:
@@ -485,9 +541,12 @@ def _with_catalog_currency(comp: ResolvedComponent, catalog: pd.DataFrame | None
     return ResolvedComponent(**{**comp.__dict__, "currency": currency})
 
 
-def _check_currency(comp: ResolvedComponent) -> ResolvedComponent:
+def _check_currency(comp: ResolvedComponent, fx: str = "none") -> ResolvedComponent:
     if comp.currency in (CNY, "", None):
         return comp
+    if fx == fx_mod.FX_CONVERT:
+        text = fx_mod.converted_caveat([comp.currency])
+        return ResolvedComponent(**{**comp.__dict__, "note": f"{comp.note}；{text}" if comp.note else text})
     msg = f"基准成分 {comp.name}（{comp.code}）以{comp.currency}计价，{FX_CAVEAT}"
     warnings.warn(msg, RuntimeWarning, stacklevel=3)
     note = f"{comp.note}；{FX_CAVEAT}" if comp.note else FX_CAVEAT
@@ -511,10 +570,11 @@ def resolve_benchmark(
     return_type: str = TOTAL,
     deposit_rate: float = DEMAND_DEPOSIT_RATE,
     time_deposit_rate: float = TIME_DEPOSIT_RATE,
+    fx: str = "none",
 ) -> list[ResolvedComponent]:
     """解析合同业绩比较基准原文：parse_benchmark 拆出成分与权重，逐个 resolve_component。
 
-    任一成分无法解析时，收集全部未解析的成分后一并报错（BenchmarkResolutionError），
+    ``fx`` 见 resolve_component。任一成分无法解析时，收集全部未解析的成分后一并报错（BenchmarkResolutionError），
     列出原因并提示 --benchmark-map 的写法，不做猜测。
     """
     parts = parse_benchmark(text)
@@ -524,7 +584,7 @@ def resolve_benchmark(
         try:
             comp = resolve_component(
                 name, catalog, overrides, return_type=return_type,
-                deposit_rate=deposit_rate, time_deposit_rate=time_deposit_rate,
+                deposit_rate=deposit_rate, time_deposit_rate=time_deposit_rate, fx=fx,
             )
         except BenchmarkResolutionError as exc:
             unresolved += exc.unresolved

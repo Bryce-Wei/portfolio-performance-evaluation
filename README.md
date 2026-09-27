@@ -26,18 +26,19 @@
 
 ## 代码：fundeval 工具包
 
-`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、多因子分解（含 A 股指数代理因子）、Campisi 固收归因、择时模型、交易成本与策略容量、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。只输入基金代码即可评价：自动取基金概况与合同业绩比较基准并解析成复合基准；也可多基金横向对比。
+`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、多因子分解（含 A 股指数代理因子）、Campisi 固收归因、择时模型、交易成本与策略容量、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。只输入基金代码即可评价：自动取基金概况与合同业绩比较基准并解析成复合基准（非人民币成分按人民币汇率中间价换算）；也可多基金横向对比，报告可附 PNG 图表。
 
 | 模块 | 对应章节 | 状态 |
 | --- | --- | --- |
 | `etl/`（schema、sources/files、clean、returns：单期收益与 to_frequency 频率转换） | 一 数据准备 | 已实现 |
-| `etl/sources/akshare.py`（基金单位净值加分红的总收益、基金概况 `fund_profile`（类型、费率、合同基准原文，缓存 1 天）、中证指数目录 `index_catalog`（缓存 7 天）、指数行情、Shibor / 国债利率换算、网络重试与数据源自动切换、带覆盖检查的本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
+| `etl/sources/akshare.py`（基金单位净值加分红的总收益、基金概况 `fund_profile`（类型、费率、合同基准原文，缓存 1 天）、中证指数目录 `index_catalog`（缓存 7 天）、人民币汇率中间价 `fx_rates`（国家外汇管理局，每单位外币折合人民币，缓存 1 天）、指数行情、Shibor / 国债利率换算、网络重试与数据源自动切换、带覆盖检查的本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
 | `etl/benchmark.py`（指数表与全收益代码、基准收益类型、复合基准合成、合同基准文字解析，`resolve_benchmark` 把合同基准逐项解析为代码、收益类型、币种与数据源）、`etl/quality.py`（数据质量报告、净值与日增长率交叉核对） | 一 数据准备 | 已实现 |
+| `etl/fx.py`（外币指数收益换算为人民币收益：r_CNY = (1 + r_外币) × S_t / S_t−1 − 1，asof 对齐中间价，不用未来数据） | 一 数据准备 | 已实现 |
 | `etl/sources` French 因子数据源 | 一 数据准备 | 待实现 |
 | `returns.py`（TWR、年化、MWR/XIRR、超额收益） | 二 收益衡量 | 已实现 |
 | `risk.py`（波动、回撤、Sharpe、IR、Treynor、M²） | 三 风险调整 | 已实现 |
 | `alpha/`（regression：因子与 CAPM 回归、HAC 标准误、可选 t 分布推断；rolling：滚动 Alpha/Beta、滚动 IR、样本内外切分；robustness：剔除异常期后重估 CAPM 与择时回归；fundamental：IR ≈ TC × IC × √BR） | 四 Alpha 来源 | 已实现 |
-| `attribution/style.py`（Sharpe 收益型风格分析：非负、和为 1 的约束回归，R²、残差均值与波动、共线性诊断、滚动风格权重）；`etl/benchmark.py` 的 `style_preset` 风格指数预设 | 五 第 1 节 | 已实现 |
+| `attribution/style.py`（Sharpe 收益型风格分析：非负、和为 1 的约束回归，R²、残差均值与波动、共线性诊断、滚动风格权重）；`etl/benchmark.py` 的 `style_preset` 风格指数预设与 `auto_style_preset`（按基金类型选择预设） | 五 第 1 节 | 已实现 |
 | `attribution/brinson.py`（单期 BHB / BF、多期 Cariño 链接与对账） | 五 第 2 节 | 已实现 |
 | `attribution/timing.py`（Treynor–Mazuy、Henriksson–Merton） | 五 第 5 节 | 已实现 |
 | `attribution/factor.py`（多因子回归、因子暴露与收益贡献对账、A 股指数代理因子预设 `cn_index_proxy`） | 五 第 3 节 | 已实现 |
@@ -45,19 +46,19 @@
 | `costs.py`（换手率、线性交易成本、近似净 Alpha、逐资产容量检查、规模变化的成本敏感性与平方根冲击模型） | 六 交易成本 | 已实现（冲击参数须用成交记录校准） |
 | `monitor.py`（滚动实现 TE（K 须显式给出）、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
 | `tail.py`（下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES） | 八 尾部风险 | 已实现 |
-| `report/`（evaluate 按六个评价维度汇总，含多因子分解、收益来源的风格分析、成本与容量、剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel；`compare` 多基金横向对比）与 `cli.py`（`fundeval report`、`fundeval compare`） | 九、十 | 已实现 |
+| `report/`（evaluate 按六个评价维度汇总，含多因子分解、收益来源的风格分析、成本与容量、剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel；`compare` 多基金横向对比；`charts` 生成财富指数、回撤、滚动超额与 TE、滚动风格权重与多基金对比 PNG）与 `cli.py`（`fundeval report`、`fundeval compare`） | 九、十 | 已实现（图表为可选依赖 `plot`） |
 
 ### 安装
 
 ```bash
-pip install -e ".[data,excel]"      # data：akshare 数据源；excel：读写 xlsx
+pip install -e ".[data,excel,plot]" # data：akshare 数据源；excel：读写 xlsx；plot：matplotlib 图表
 pip install -e ".[test]" && pytest  # 测试不访问网络
 pytest -m network                   # 本地运行联网冒烟测试（需安装 data）
 ```
 
 联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债、风格指数），一个数据源不可达不影响其他项。东方财富指数、Shibor 与中债三项遇到连接类或超时类异常（ConnectionError、requests.Timeout、UpstreamTimeout）时跳过并注明原因，列名、格式或数值错误仍然算失败（规则见 `tests/data/akshare/README.md`）。
 
-依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
+依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
 
 ### 命令行
 
@@ -73,8 +74,8 @@ fundeval report --fund 110011 --benchmark-map "中债总指数=cbond:composite" 
 
 # 多基金横向对比：同一区间、同一无风险收益，各自按合同基准逐只评价；单只失败时记录原因并继续
 fundeval compare --funds 110011,110020,000001 --start 2021-01-01 --end 2025-12-31 \
-    --benchmark-map "中债总指数=cbond:composite" --factors cn_index_proxy --style cn_equity \
-    --sort sharpe --out compare.xlsx
+    --benchmark-map "中债总指数=cbond:composite" --factors cn_index_proxy --style auto \
+    --sort sharpe --charts --out compare.xlsx
 ```
 
 给出 `--fund` 而未给 `--benchmark` 时，基准默认为 `contract`：从 `fund_overview_em` 取合同业绩比较基准原文（如 110020 的“沪深300指数收益率\*95%+活期存款利率(税后)\*5%”），`parse_benchmark` 拆出成分与权重，再按以下顺序逐项解析，先命中者为准：
@@ -85,7 +86,7 @@ fundeval compare --funds 110011,110020,000001 --start 2021-01-01 --end 2025-12-3
 4. 中债指数：“中债-综合财富(总值)”→ `cbond:composite`（全收益），“中债-综合全价(总值)”→ `cbond:composite_full`（`bond_composite_index_cbond(indicator="全价")`，价格指数）；“中债总指数”名称有歧义，不自动映射；
 5. 中证指数目录 `index_csindex_all`：去掉“收益率”“指数”后缀后与指数简称、全称精确比较，恰好一条才采用（如“中证800成长指数”→ H30355），收益类型记为未知，报告沿用价格指数的限定语。
 
-任何成分解析失败都报错，列出全部未解析的成分与 `--benchmark-map` 写法，不做猜测。成分以非人民币计价时（如中证香港300 H11164，港元）发出警告，口径与附注写明“未做汇率换算，基准收益含汇率差异”。报告口径另写基金全称、基金类型、合同基准原文、解析结果表（成分、权重、代码、收益类型、币种、数据源）与费率（管理费、托管费、销售服务费，费用后净值口径下注明“已含于费用后净值，不再扣减”）。指数型基金在结论中先报告跟踪误差与年化跟踪偏离；QDII 基金提示汇率与境外市场的影响。
+任何成分解析失败都报错，列出全部未解析的成分与 `--benchmark-map` 写法，不做猜测。成分以非人民币计价时（如中证香港300 H11164，港元），默认 `--fx convert` 换算为人民币收益（见下文“汇率换算”），口径写明“港元指数按国家外汇管理局人民币汇率中间价换算为人民币收益”；`--fx none` 时不换算，发出警告，口径与附注写明“未做汇率换算，基准收益含汇率差异”。报告口径另写基金全称、基金类型、合同基准原文、解析结果表（成分、权重、代码、收益类型、币种、数据源）与费率（管理费、托管费、销售服务费，费用后净值口径下注明“已含于费用后净值，不再扣减”）。指数型基金在结论中先报告跟踪误差与年化跟踪偏离；QDII 基金提示汇率与境外市场的影响。
 
 `fundeval compare` 的对比表列出基金代码、简称、类型、基准收益类型、期数、年化收益、年化波动、最大回撤、Sharpe、累计超额（对各自基准）、TE、IR、CAPM Alpha（算术年化）及 t，给出 `--factors` 时加多因子 Alpha 及 t，给出 `--style` 时加风格前两项，另有数据质量问题数、标注与失败原因。不做综合打分，默认按输入顺序；`--sort`（`annualized_return`、`volatility`、`max_drawdown`、`sharpe`、`excess`、`tracking_error`、`ir`、`alpha`、`factor_alpha`、`treynor`）只按单一指标排序，失败的基金排在最后，表下注明：不同类型的基金不宜直接比较，只比较同类基金；样本少于 36 个月的基金单独标注；β 接近 0 或为负（β ≤ 0.1）时 Treynor 不参与排序。Excel 输出中对比表一个 sheet，每只基金的关键指标（失败时为失败原因）各一个 sheet，另有“失败原因”与“口径”sheet。
 
@@ -127,15 +128,17 @@ fundeval report --input tests/data/worked_example.csv \
 | `--benchmark-map` | 无 | 合同基准中无法自动解析的成分：`"名称=代码"`，逗号分隔，如 `"中债总指数=cbond:composite"`；现金写 `cash:0.02` |
 | `--deposit-rate` / `--time-deposit-rate` | `0.0035` / `0.015` | 合同基准中活期、一年期定期存款利率的年化数值 |
 | `--index-return-type` | `total` | `total` 把基准成分换成全收益指数（000300 → H00300 等，见下节），没有全收益版本的成分沿用原代码并警告；`price` 使用价格指数，报告写明高估限定 |
+| `--fx` | `convert` | 非人民币基准成分：`convert` 按国家外汇管理局人民币汇率中间价换算为人民币收益，汇率取数失败时报错并提示 `--fx none`（不静默跳过）；`none` 不换算，口径注明“未做汇率换算” |
 | `--index-source` | `auto` | `auto`：H 开头等中证代码走中证指数官网，纯数字代码先试东方财富、网络失败后改用中证官网；也可指定 `em` 或 `csindex` |
 | `--rf` | `auto` | `auto`：`--fund` 时等价于 `shibor3m,cgb2y`，依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取单个来源 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y`，逗号分隔的顺序列表（如 `cgb2y,shibor3m`），或常数年化利率（如 `0.018`） |
-| `--style` / `--style-window` | 无 | 风格分析：预设名 `cn_equity`（沪深300成长 H00918、沪深300价值 H00919、中证500 H00905、中证1000 H00852、现金）、`cn_balanced`（再加中证全债 H11001，收益类型未知，报告注明），或逗号分隔的代码列表（`cash` 表示无风险收益）。指数按 `--index-return-type` 默认换成全收益代码，数据源与收益类型写入口径；`--style-window` 另附滚动权重，窗口不小于风格资产数 + 2 |
+| `--style` / `--style-window` | 无 | 风格分析：`auto`（需 `--fund`，按基金类型选择预设，见下文）、预设名 `cn_equity`（沪深300成长 H00918、沪深300价值 H00919、中证500 H00905、中证1000 H00852、现金）、`cn_balanced`（再加中证全债 H11001，收益类型未知，报告注明），或逗号分隔的代码列表（`cash` 表示无风险收益）。指数按 `--index-return-type` 默认换成全收益代码，数据源与收益类型写入口径；`--style-window` 另附滚动权重，窗口不小于风格资产数 + 2 |
 | `--factors` | 无 | 多因子分解的因子预设。`cn_index_proxy`：MKT = 沪深300全收益 H00300 − 无风险收益，SMB = 中证1000全收益 H00852 − H00300，HML = 沪深300价值全收益 H00919 − 沪深300成长全收益 H00918，均经中证指数官网取数；不含 UMD。报告在“Alpha 质量”一节给出多因子 Alpha（每期、算术年化、t、p）与因子暴露、贡献表，回归沿用 `--hac-lags` 与 `--use-t` |
 | `--freq` / `--input-freq` | `M` / 同 `--freq` | 评价频率；`--input-freq D --freq M` 先把日度收益按期内复利合成为月度 |
 | `--hac-lags` / `--use-t` | 无 / 关 | Newey–West 标准误的滞后阶数；`--use-t` 让 HAC 的 p 值与置信区间也用 t 分布。月度样本不足 120 期且使用 HAC 时建议加 `--use-t`，否则正态近似会高估显著性 |
 | `--mar` | 无风险收益 | Sortino 的最低可接受收益（每期，小数） |
 | `--target-active` / `--target-te` / `--window` | 无 | 三者同时给出时报告包含持续监控分区 |
 | `--tolerance` | `0.0005` | 净值推算收益与日增长率交叉核对容差（5 个基点） |
+| `--charts` | 关 | 生成 PNG 图表（需 `plot`，须与 `--out` 一起用）：Markdown 把图片存到“<报告名>_files/”并用相对路径嵌入，Excel 另加“图表”sheet |
 | `--fees` / `--title` | `费用后净值` / 自动 | 费用口径说明与报告标题 |
 | `--cache-dir` / `--no-cache` / `--refresh` | `~/.fundeval/cache` | 原始数据缓存目录、关闭缓存、强制重新拉取 |
 | `--timeout` | `30` | 单个 HTTP 请求（连接与读取）的超时秒数。akshare 内部调用 requests 时多未设超时，请求可能无限挂起；分页接口每页单独计时；超时后按网络异常重试或切换数据源 |
@@ -144,6 +147,32 @@ fundeval report --input tests/data/worked_example.csv \
 无风险利率均按复利口径 (1 + y)^(1/K) − 1 换算为每期，并取期初已知的报价。组合与基准的对齐由 `evaluate` 完成，报告口径写明“组合 N 期、基准 M 期、共同 K 期”，被丢弃的期列入附注。
 
 数据源与缓存：超时分两层。`--timeout`（默认 30 秒，Python 中为各取数函数的 `timeout` 参数）限制每个 HTTP 请求的连接与读取，足以防止连接挂起；一次接口调用可能翻很多页，例如 Shibor 3M（`rate_interbank`）约 10 页、本地实测 44–119 秒，每页各自计时，不会因累计耗时而超时。`--total-timeout`（默认 300 秒，参数 `total_timeout`）限制一次接口调用的总时长，只作兜底，防止上游不经 requests 或反复慢而不断；它由后台线程实现，线程无法强行终止，超时后该线程可能仍在运行，其结果会被丢弃。两个参数设为 `None` 表示不启用对应一层。网络类异常（requests 异常、连接断开、超时）自动重试，共 3 次，指数退避；自动切换数据源时（指数东方财富 → 中证官网，无风险利率按顺序列表），非最后一个候选只尝试 1 次就切换，最后一个候选才重试 3 次，避免在不稳定的数据源上白等（本地实测 110011 全流程 196 秒中约 100 秒花在 Shibor 的 3 次读取超时上）；指数与无风险利率的自动切换都会发出警告，实际来源写入报告口径与附注。缓存命中时检查覆盖范围：数据最后日期早于截止日（或今天）之前最后一个工作日 7 天以上即重新拉取；不接受日期参数的接口（基金净值、Shibor、中债）与未给截止日的请求，缓存文件超过 1 天也会重新拉取（Python 中可用 `cache_lag_days`、`cache_max_age` 调整）。重新拉取失败时回退到旧缓存，但一定发出警告，并在报告附注中注明“使用 YYYY-MM-DD 的缓存数据”。网络失败导致无法出报告时，命令输出一行中文错误与替代办法，返回码 2。
+
+### 汇率换算
+
+基金净值以人民币计价，合同基准中的境外成分（如 110011 的“中证香港300指数”，H11164，港元）若直接用港元收益，基准收益会含港元兑人民币的汇率变动。默认 `--fx convert` 按国家外汇管理局人民币汇率中间价（akshare `currency_boc_safe()`，每 100 外币折合人民币元，`fx_rates` 已除以 100）换算：
+
+    r_CNY,t = (1 + r_local,t) × (S_t / S_{t−1}) − 1
+
+先在日度上换算，再按期内复利合成为月度等频率。指数交易日与中间价发布日不一致（如香港交易、内地休市）时，S 取不晚于当日的最近一个中间价（asof），不使用未来数据；区间起点之前没有中间价时报错。币种取中证指数目录的“指数币种”写法，与 `currency_boc_safe` 的列名逐字对应，对应不上时报错，不猜测。汇率取数失败时报错并提示可改用 `--fx none`；`--fx none` 时不换算，沿用“未做汇率换算，基准收益含汇率差异”的限定语。`--benchmark` 直接给出指数表以外的代码时，也会在中证指数目录中查币种后按同一规则处理。
+
+### 中债指数取数失败时的替代
+
+中债网站（yield.chinabond.com.cn）在部分网络环境下无法连接。合同基准中的中债成分（如 000001 的“中债-综合全价(总值)指数”）取数失败时，错误信息在原有内容之后补充：可用 `--benchmark-map` 显式指定中证指数官网可取的债券指数作为替代，例如
+
+```bash
+fundeval report --fund 000001 --benchmark-map "中债-综合全价(总值)=H11001" --out report.md
+```
+
+这会改变基准口径（中证全债 H11001 与中债综合指数的编制方与样本不同，H11001 的收益类型未经核实），报告的基准解析会注明“调用方指定”。工具不会自动替换。
+
+### 按基金类型选择风格预设
+
+`--style auto` 按基金概况的“基金类型”选择风格预设，关键词按以下顺序匹配，先命中者为准：偏股 → `cn_equity`；偏债、债券、FOF、混合 → `cn_balanced`（含中证全债 H11001）；股票（含“指数型-股票”）→ `cn_equity`；都不含时用 `cn_balanced` 并写明无法判断。先查“偏股”“偏债”这类限定词，是因为“QDII-混合偏股”同时含“混合”，否则偏股基金永远选不到 `cn_equity`。例如 110011“QDII-混合偏股”→ `cn_equity`，110020“指数型-股票”→ `cn_equity`，000001“混合型-灵活”→ `cn_balanced`。选中的预设与依据写入报告口径“风格预设”与附注，`compare` 的对比表另加“风格预设”列。本地实测 000001 华夏成长混合用 `cn_equity` 时“现金”权重约 30%，这是预设中没有债券指数、债券仓位只能落到现金上的结果。
+
+### 报告图表
+
+`--charts`（Python 中 `to_markdown(report, path, charts=True)`、`to_excel(report, path, charts=True)`，或直接调用 `fundeval.report.charts.report_charts`）生成以下 PNG：组合与基准的财富指数（期初 = 1）；回撤曲线，标出最大回撤的峰值、谷底与修复日期（未修复时注明）；滚动 12 期的超额收益（组合与基准滚动累计收益之差）与跟踪误差（年化），样本不足 12 期时不画并注明；有滚动风格分析（`--style-window`）时画风格权重的堆积面积图。`fundeval compare --charts` 把所有基金的财富指数（期初 = 1）画在同一张图上（最多 8 只）。Markdown 报告把图片保存到“<报告名>_files/”目录并用相对路径嵌入，Excel 报告另加“图表”sheet。图表使用 Agg 后端，不弹窗；中文字体依次查找 Microsoft YaHei、SimHei、PingFang SC、Noto Sans CJK SC、WenQuanYi 等，都没有时改用英文标签并发出警告，避免中文显示为方框。
 
 ### 价格指数与全收益指数
 
