@@ -48,8 +48,13 @@ class FakeAkshare(types.SimpleNamespace):
             if delays and isinstance(delays[0], (list, tuple)):
                 delays = delays[min(self.count(name), len(delays)) - 1]
             for i, delay in enumerate(delays, 1):
+                if self._released.is_set():  # 测试已结束：被总时限放弃的后台线程不再发请求
+                    break
                 # 与 akshare 一样不传 timeout
-                requests.get(f"http://fake-akshare.invalid/{name}?page={i}", headers={"X-Fake-Delay": str(delay)})
+                requests.get(
+                    f"http://fake-akshare.invalid/{name}?page={i}",
+                    headers={"X-Fake-Delay": str(delay), "X-Fake-Id": str(id(self))},
+                )
 
     def fund_open_fund_info_em(self, symbol="710001", indicator="单位净值走势", period="成立来"):
         self._log("fund_open_fund_info_em", symbol=symbol, indicator=indicator)
@@ -80,12 +85,14 @@ class FakeAkshare(types.SimpleNamespace):
 
 
 def patch_http(monkeypatch, fake):
-    """把 requests 的传输层替换为按 X-Fake-Delay 头耗时响应的假实现，记录每个请求收到的 timeout。"""
+    """把 requests 的传输层替换为按 X-Fake-Delay 头耗时响应的假实现，记录 ``fake`` 发出的每个请求收到的 timeout。"""
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         delay = float(request.headers.get("X-Fake-Delay", 0))
         read_timeout = timeout[1] if isinstance(timeout, tuple) else timeout
-        fake.http.append((request.url, read_timeout))
+        # 只记录本测试的请求：前一个测试被放弃的后台线程可能仍在发请求
+        if request.headers.get("X-Fake-Id") == str(id(fake)):
+            fake.http.append((request.url, read_timeout))
         if read_timeout is not None and delay >= read_timeout:
             fake._released.wait(read_timeout)
             raise requests.exceptions.ReadTimeout(f"Read timed out. (read timeout={read_timeout})", request=request)
