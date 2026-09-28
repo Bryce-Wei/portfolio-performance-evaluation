@@ -364,7 +364,7 @@ def test_cli_stdout_markdown_and_help_as_gbk(tmp_path):
 
 def test_cli_warning_lines_on_gbk_stream():
     raw = io.BytesIO()
-    stream = io.TextIOWrapper(raw, encoding="gbk")
+    stream = io.TextIOWrapper(raw, encoding="gbk", newline="\n")  # Windows 下默认把 \\n 写成 \\r\\n
     log = cli.WarningLog(stream=stream)
     with log.capture():
         warnings.warn("MKT = H00300 − rf，M² 缺失", RuntimeWarning)
