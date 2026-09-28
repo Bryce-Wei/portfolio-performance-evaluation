@@ -260,7 +260,7 @@ def test_cli_version(capsys):
 def test_version_works_from_source_without_package_metadata(tmp_path):
     """以 PYTHONPATH=src 运行源码（用户本机从 zip 解压后的方式）时没有已安装包的元数据：
     子进程先让 importlib.metadata 查不到任何包，再读取 __version__ 与 --version。"""
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "utf-8"}
     code = (
         "import importlib.metadata as m\n"
         "def missing(*a, **k):\n"
@@ -271,10 +271,10 @@ def test_version_works_from_source_without_package_metadata(tmp_path):
         "print(fundeval.__version__)\n"
         "cli.main(['--version'])\n"
     )
-    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=tmp_path, capture_output=True, text=True)
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=tmp_path, capture_output=True, encoding="utf-8")
     assert out.returncode == 0, out.stderr
     assert out.stdout.split() == ["0.2.0", "fundeval", "0.2.0"]
-    out = subprocess.run([sys.executable, "-m", "fundeval", "--version"], env=env, cwd=tmp_path, capture_output=True, text=True)
+    out = subprocess.run([sys.executable, "-m", "fundeval", "--version"], env=env, cwd=tmp_path, capture_output=True, encoding="utf-8")
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "fundeval 0.2.0"
 
@@ -282,13 +282,13 @@ def test_version_works_from_source_without_package_metadata(tmp_path):
 # ------------------------------ 四、离线示例 ------------------------------
 
 
-def _run_quickstart(tmp_path, *extra, encoding=None):
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
-    if encoding:
-        env["PYTHONIOENCODING"] = encoding
+def _run_quickstart(tmp_path, *extra):
+    # 子进程固定 UTF-8 输出，父进程按 UTF-8 读取，不受本机区域编码（如中文 Windows 的 GBK）与已设置的
+    # PYTHONIOENCODING 影响；GBK 输出的情形由 test_quickstart_output_redirected_as_gbk 单独覆盖
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "utf-8"}
     return subprocess.run(
         [sys.executable, str(ROOT / "examples" / "quickstart.py"), "--out", str(tmp_path / "out"), *extra],
-        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=300,
+        env=env, cwd=tmp_path, capture_output=True, encoding="utf-8", timeout=300,
     )
 
 
@@ -364,7 +364,7 @@ def test_cli_stdout_markdown_and_help_as_gbk(tmp_path):
 
 def test_cli_warning_lines_on_gbk_stream():
     raw = io.BytesIO()
-    stream = io.TextIOWrapper(raw, encoding="gbk", newline="\n")  # Windows 下默认把 \\n 写成 \\r\\n
+    stream = io.TextIOWrapper(raw, encoding="gbk", newline="\n")  # Windows 下默认把换行写成 \\r\\n
     log = cli.WarningLog(stream=stream)
     with log.capture():
         warnings.warn("MKT = H00300 − rf，M² 缺失", RuntimeWarning)
