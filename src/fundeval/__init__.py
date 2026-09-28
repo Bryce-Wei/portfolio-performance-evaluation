@@ -19,7 +19,7 @@
 约定：所有收益率以小数输入输出（0.02 表示 2%）；K 为一年期数，月度取 12。
 """
 
+from fundeval._version import __version__
 from fundeval import alpha, attribution, costs, etl, monitor, report, returns, risk, tail
 
-__all__ = ["etl", "returns", "risk", "alpha", "attribution", "costs", "tail", "monitor", "report"]
-__version__ = "0.1.0"
+__all__ = ["__version__", "etl", "returns", "risk", "alpha", "attribution", "costs", "tail", "monitor", "report"]

@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 .venv/
+quickstart_output/
+# docs/examples 只提交 Markdown 报告与图表 PNG
+docs/examples/*.xlsx

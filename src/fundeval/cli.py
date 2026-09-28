@@ -36,16 +36,23 @@ Sharpe 风格分析，``--style-window 36`` 另附滚动权重；风格指数默
 ``--factors cn_index_proxy`` 在“Alpha 质量”一节做多因子分解（attribution.factor）：MKT = H00300 − 无风险收益，
 SMB = H00852 − H00300，HML = H00919 − H00918，均取中证指数官网全收益指数；这是指数代理因子，
 与 Fama–French 分组构造不同。多因子回归沿用 ``--hac-lags`` 与 ``--use-t``。
+
+命令行中的 Python 警告改为每条一行“警告：<消息>”输出到标准错误，不显示源码路径与代码行，同一条消息只显示一次；
+``--quiet`` 关闭警告输出。取数与评价阶段的警告同时写入报告附注（已在附注中的不重复写入），``--quiet`` 不影响附注。
+Python API（evaluate、compare 等）的 warnings 行为不变。``--version`` 显示版本号。
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import urllib.error
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
+from fundeval._version import __version__
 from fundeval.attribution.factor import FACTOR_PRESETS
 from fundeval.etl import schema
 from fundeval.etl.fx import FX_CONVERT, FX_MODES
@@ -68,6 +75,56 @@ from fundeval.report.summary import DEFAULT_FEE_BASIS
 NETWORK_HINT = "可改用 --index-source csindex（中证指数官网）、常数无风险利率 --rf 0.018，稍后重试，或加 --refresh 重新拉取缓存"
 
 
+#: 写入报告附注的警告类别（第三方库的 FutureWarning、DeprecationWarning 等只在命令行显示）
+NOTE_WARNING_CATEGORIES = (RuntimeWarning, UserWarning)
+
+
+class WarningLog:
+    """命令行的警告处理：每条警告一行“警告：<消息>”写到标准错误（``quiet`` 时不写），同一条消息只显示一次；
+    ``messages`` 按出现顺序保存去重后的 (类别, 消息)，供写入报告附注。"""
+
+    def __init__(self, quiet: bool = False, stream=None):
+        self.quiet = quiet
+        self.stream = stream
+        self.messages: list[tuple[type[Warning], str]] = []
+        self._seen: set[str] = set()
+
+    @staticmethod
+    def format(message) -> str:
+        """去掉换行与多余空白，得到一行消息。"""
+        return " ".join(str(message).split())
+
+    def showwarning(self, message, category, filename, lineno, file=None, line=None) -> None:
+        text = self.format(message)
+        if not text or text in self._seen:
+            return
+        self._seen.add(text)
+        self.messages.append((category, text))
+        if not self.quiet:
+            print(f"警告：{text}", file=self.stream or sys.stderr)
+
+    @contextlib.contextmanager
+    def capture(self):
+        """块内的警告交给 showwarning；RuntimeWarning 与 UserWarning 每次都送达（去重由本类按消息完成），
+        其他类别沿用 Python 的默认过滤规则。退出时恢复原有的 warnings 设置。"""
+        with warnings.catch_warnings():
+            for category in NOTE_WARNING_CATEGORIES:
+                warnings.simplefilter("always", category)
+            warnings.showwarning = self.showwarning
+            yield self
+
+    def since(self, start: int) -> list[str]:
+        """第 start 条之后、应写入附注的警告消息。"""
+        return [text for category, text in self.messages[start:] if issubclass(category, NOTE_WARNING_CATEGORIES)]
+
+
+def _merge_notes(notes: list[str], messages: list[str]) -> None:
+    """把警告消息追加到附注，已在附注中（相同或被包含）的跳过。"""
+    for text in messages:
+        if not any(text in WarningLog.format(n) for n in notes):
+            notes.append(text)
+
+
 def _check_charts(args) -> None:
     """--charts 须与 --out 一起使用（图片要存到报告旁的目录）；未安装 matplotlib 时提前给出安装提示。"""
     if not getattr(args, "charts", False):
@@ -79,15 +136,18 @@ def _check_charts(args) -> None:
     require_matplotlib()
 
 
-def cmd_report(args) -> int:
+def cmd_report(args, log: WarningLog | None = None) -> int:
     from fundeval.etl.sources import akshare as aks
 
+    log = log or WarningLog()
     _check_charts(args)
 
+    start = len(log.messages)
     with aks.collect_notes() as source_notes:
         inputs = build_report_inputs(ReportOptions.from_namespace(args))
     inputs["notes"] = source_notes + inputs["notes"]
     report = evaluate(**inputs)
+    _merge_notes(report.notes, log.since(start))
     out = args.out
     if out is None:
         sys.stdout.write(to_markdown(report))
@@ -103,12 +163,15 @@ def cmd_report(args) -> int:
     return 0
 
 
-def cmd_compare(args) -> int:
+def cmd_compare(args, log: WarningLog | None = None) -> int:
+    log = log or WarningLog()
     _check_charts(args)
     codes = [c.strip() for c in args.funds.replace("，", ",").split(",") if c.strip()]
     opts = ReportOptions.from_namespace(args, fund=None, input=None)
+    start = len(log.messages)
     result = compare(codes, args.start, args.end, freq=args.freq, benchmark=args.benchmark or "contract",
                      sort=args.sort, options=opts)
+    _merge_notes(result.notes, log.since(start))
     out = args.out
     if out is None:
         sys.stdout.write(result.to_markdown())
@@ -197,6 +260,10 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
         help="生成 PNG 图表（需 pip install \"fundeval[plot]\"）：Markdown 存到“<报告名>_files/”并用相对路径嵌入，"
         "Excel 另加“图表”sheet；须与 --out 一起使用",
     )
+    p.add_argument(
+        "--quiet", action="store_true",
+        help="不在标准错误输出警告（警告仍写入报告附注）；错误信息照常输出",
+    )
     p.add_argument("--fees", default=DEFAULT_FEE_BASIS, help=f"费用口径说明（默认“{DEFAULT_FEE_BASIS}”）")
     p.add_argument("--cache-dir", help="akshare 原始数据缓存目录（默认 ~/.fundeval/cache）")
     p.add_argument("--no-cache", action="store_true", help="不读写缓存")
@@ -215,6 +282,7 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fundeval", description="基金与投资组合绩效评估")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     rp = sub.add_parser("report", help="生成评价报告（Markdown 或 Excel）")
     src = rp.add_mutually_exclusive_group(required=True)
@@ -260,8 +328,10 @@ def _one_line(exc: BaseException) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    log = WarningLog(quiet=getattr(args, "quiet", False))
     try:
-        return args.func(args)
+        with log.capture():
+            return args.func(args, log)
     except Exception as exc:
         if _is_network_error(exc):
             print(f"错误：网络请求失败（{_one_line(exc)}）。{NETWORK_HINT}", file=sys.stderr)
