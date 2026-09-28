@@ -52,6 +52,7 @@ import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
+from fundeval._console import console_print, console_safe, console_write
 from fundeval._version import __version__
 from fundeval.attribution.factor import FACTOR_PRESETS
 from fundeval.etl import schema
@@ -101,7 +102,7 @@ class WarningLog:
         self._seen.add(text)
         self.messages.append((category, text))
         if not self.quiet:
-            print(f"警告：{text}", file=self.stream or sys.stderr)
+            console_print(f"警告：{text}", file=self.stream or sys.stderr)
 
     @contextlib.contextmanager
     def capture(self):
@@ -150,7 +151,7 @@ def cmd_report(args, log: WarningLog | None = None) -> int:
     _merge_notes(report.notes, log.since(start))
     out = args.out
     if out is None:
-        sys.stdout.write(to_markdown(report))
+        console_write(to_markdown(report), sys.stdout)
         return 0
     suffix = Path(out).suffix.lower()
     if suffix in {".xlsx", ".xlsm"}:
@@ -159,7 +160,7 @@ def cmd_report(args, log: WarningLog | None = None) -> int:
         to_markdown(report, out, charts=args.charts)
     else:
         raise ValueError(f"--out 只支持 .md 或 .xlsx，收到 {out!r}")
-    print(f"报告已写入 {out}", file=sys.stderr)
+    console_print(f"报告已写入 {out}", file=sys.stderr)
     return 0
 
 
@@ -174,7 +175,7 @@ def cmd_compare(args, log: WarningLog | None = None) -> int:
     _merge_notes(result.notes, log.since(start))
     out = args.out
     if out is None:
-        sys.stdout.write(result.to_markdown())
+        console_write(result.to_markdown(), sys.stdout)
         return 0
     suffix = Path(out).suffix.lower()
     if suffix in {".xlsx", ".xlsm"}:
@@ -183,7 +184,7 @@ def cmd_compare(args, log: WarningLog | None = None) -> int:
         result.to_markdown(out, charts=args.charts)
     else:
         raise ValueError(f"--out 只支持 .md 或 .xlsx，收到 {out!r}")
-    print(f"对比表已写入 {out}（成功 {len(result.reports)} 只，失败 {len(result.failures)} 只）", file=sys.stderr)
+    console_print(f"对比表已写入 {out}（成功 {len(result.reports)} 只，失败 {len(result.failures)} 只）", file=sys.stderr)
     return 0
 
 
@@ -280,8 +281,17 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+class _Parser(argparse.ArgumentParser):
+    """帮助、版本与参数错误的输出也按 console_safe 处理编码（帮助文字含“−”等 GBK 没有的字符）。"""
+
+    def _print_message(self, message, file=None):
+        if message:
+            file = file if file is not None else sys.stderr
+            console_write(message, file)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="fundeval", description="基金与投资组合绩效评估")
+    parser = _Parser(prog="fundeval", description="基金与投资组合绩效评估")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     rp = sub.add_parser("report", help="生成评价报告（Markdown 或 Excel）")
@@ -334,10 +344,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return args.func(args, log)
     except Exception as exc:
         if _is_network_error(exc):
-            print(f"错误：网络请求失败（{_one_line(exc)}）。{NETWORK_HINT}", file=sys.stderr)
+            console_print(f"错误：网络请求失败（{_one_line(exc)}）。{NETWORK_HINT}", file=sys.stderr)
             return 2
         if isinstance(exc, (ValueError, KeyError, ImportError, RuntimeError, FileNotFoundError)):
-            print(f"错误：{exc}", file=sys.stderr)
+            console_print(f"错误：{exc}", file=sys.stderr)
             return 2
         raise
 

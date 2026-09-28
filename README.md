@@ -28,7 +28,7 @@ fundeval report --fund 110020 --charts --out 110020.md   # 图表存到 110020_f
 
 更多真实基金代码的命令（`compare`、`--benchmark-map`、`--fx`、`--style auto`、`--factors`）与数据源不可达时的处理见 [examples/fund_code.md](examples/fund_code.md)。
 
-未安装、直接从源码运行时（如下载 zip 解压后），设置 `PYTHONPATH=src` 并用 `python -m fundeval` 代替 `fundeval`，例如 `python -m fundeval --version`。
+未安装、直接从源码运行时（如下载 zip 解压后），设置 `PYTHONPATH=src` 并用 `python -m fundeval` 代替 `fundeval`，例如 `python -m fundeval --version`。中文 Windows 下把输出重定向到文件或管道时（编码为 GBK），“M²”“−”等字符会写成“M^2”“-”；要保留原字符，用 `--out` 写文件（UTF-8）或设置 `PYTHONIOENCODING=utf-8`。
 
 ## 功能与正文章节对照
 

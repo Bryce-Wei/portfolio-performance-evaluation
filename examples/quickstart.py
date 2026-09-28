@@ -11,7 +11,7 @@
   图表 PNG 存到 ``report_files/`` 并在“图表”一节用相对路径嵌入
 - ``report.xlsx``：Excel 报告（需 openpyxl；装了 matplotlib 时另有“图表”sheet）
 
-并在标准输出打印关键指标，可与正文第九部分核对：累计收益 10.2058%、Sharpe 1.1254、IR 2.2327、
+并在标准输出打印关键指标（输出编码无法表示“M²”等字符时，如中文 Windows 下重定向输出，按 ASCII 写法输出为“M^2”），可与正文第九部分核对：累计收益 10.2058%、Sharpe 1.1254、IR 2.2327、
 最大回撤 3.00%、M² 8.4668%。
 
 未安装 fundeval（如直接解压源码运行）时，脚本把仓库的 src/ 加入搜索路径。
@@ -32,6 +32,7 @@ try:
 except ImportError:  # 未安装时直接使用仓库源码
     sys.path.insert(0, str(ROOT / "src"))
 
+from fundeval._console import console_print  # noqa: E402
 from fundeval.etl.sources import files  # noqa: E402
 from fundeval.report import evaluate, to_excel, to_markdown  # noqa: E402
 
@@ -99,16 +100,16 @@ def main(argv=None) -> int:
         to_excel(report, out / "report.xlsx", charts=charts)
         written.append(out / "report.xlsx")
     else:
-        print('未安装 openpyxl，跳过 Excel 报告（pip install "fundeval[excel]"）', file=sys.stderr)
+        console_print('未安装 openpyxl，跳过 Excel 报告（pip install "fundeval[excel]"）', file=sys.stderr)
     if not charts and not args.no_charts:
-        print('未安装 matplotlib，报告不含图表（pip install "fundeval[plot]"）', file=sys.stderr)
+        console_print('未安装 matplotlib，报告不含图表（pip install "fundeval[plot]"）', file=sys.stderr)
 
-    print("关键指标（正文第九部分演示数据，月度，K = 12）：")
+    console_print("关键指标（正文第九部分演示数据，月度，K = 12）：")
     rows = key_metrics(report)
     width = max(len(name) for name, _ in rows)
     for name, value in rows:
-        print(f"  {name:<{width}}  {value}")
-    print("已生成：" + "、".join(str(p) for p in written))
+        console_print(f"  {name:<{width}}  {value}")
+    console_print("已生成：" + "、".join(str(p) for p in written))
     return 0
 
 

@@ -282,8 +282,10 @@ def test_version_works_from_source_without_package_metadata(tmp_path):
 # ------------------------------ 四、离线示例 ------------------------------
 
 
-def _run_quickstart(tmp_path, *extra):
+def _run_quickstart(tmp_path, *extra, encoding=None):
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    if encoding:
+        env["PYTHONIOENCODING"] = encoding
     return subprocess.run(
         [sys.executable, str(ROOT / "examples" / "quickstart.py"), "--out", str(tmp_path / "out"), *extra],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=300,
@@ -324,6 +326,51 @@ def test_quickstart_no_charts(tmp_path):
     assert res.returncode == 0, res.stderr
     assert not (tmp_path / "out" / "report_files").exists()
     assert "## 图表" not in (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+
+
+def test_quickstart_output_redirected_as_gbk(tmp_path):
+    """中文 Windows 重定向输出时标准输出为 GBK：“M²”无法编码，脚本改用 ASCII 写法，不中断。"""
+    res = subprocess.run(
+        [sys.executable, str(ROOT / "examples" / "quickstart.py"), "--out", str(tmp_path / "out"), "--no-charts"],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "gbk"},
+        cwd=tmp_path, capture_output=True, timeout=300,
+    )
+    assert res.returncode == 0, res.stderr.decode("gbk", errors="replace")
+    out = res.stdout.decode("gbk")
+    assert "M^2" in out and "8.4668%" in out and "累计收益（组合）" in out
+    # 写入文件的报告仍为 UTF-8，保留原字符
+    assert "M²" in (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+
+
+def _run_cli_gbk(tmp_path, *args):
+    return subprocess.run(
+        [sys.executable, "-m", "fundeval", *args],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "gbk"},
+        cwd=tmp_path, capture_output=True, timeout=300,
+    )
+
+
+def test_cli_stdout_markdown_and_help_as_gbk(tmp_path):
+    """--out 缺省时 Markdown 打印到标准输出（含“−”“²”），--help 含“−”：GBK 下都不中断。"""
+    res = _run_cli_gbk(tmp_path, "report", "--input", str(DATA / "worked_example.csv"), "--columns", COLUMNS)
+    assert res.returncode == 0, res.stderr.decode("gbk", errors="replace")
+    text = res.stdout.decode("gbk")
+    assert "| M^2 | 8.4668% |" in text and "n-1" in text and "√K" in text
+    res = _run_cli_gbk(tmp_path, "report", "--help")
+    assert res.returncode == 0 and "H00300 - rf" in res.stdout.decode("gbk")
+    res = _run_cli_gbk(tmp_path, "report", "--input", str(tmp_path / "missing.csv"))
+    assert res.returncode == 2 and res.stderr.decode("gbk").startswith("错误：")
+
+
+def test_cli_warning_lines_on_gbk_stream():
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="gbk")
+    log = cli.WarningLog(stream=stream)
+    with log.capture():
+        warnings.warn("MKT = H00300 − rf，M² 缺失", RuntimeWarning)
+    stream.flush()
+    assert raw.getvalue().decode("gbk") == "警告：MKT = H00300 - rf，M^2 缺失\n"
+    assert log.since(0) == ["MKT = H00300 − rf，M² 缺失"]  # 附注保留原字符
 
 
 def test_docs_examples_committed_and_linked():
