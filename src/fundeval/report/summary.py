@@ -24,7 +24,7 @@ from fundeval import monitor, risk, tail
 from fundeval import returns as ret
 from fundeval.alpha.regression import RegressionResult, capm_regression
 from fundeval.alpha.robustness import ExclusionSensitivity, exclusion_sensitivity
-from fundeval.attribution.factor import FACTOR_TYPE_ATTR, PROXY_CAVEAT, FactorDecomposition, factor_decomposition
+from fundeval.attribution.factor import FACTOR_TYPE_ATTR, FACTOR_TYPE_SHORT, FactorDecomposition, factor_decomposition
 from fundeval.attribution.style import RollingStyleResult, StyleResult, rolling_style, style_analysis
 from fundeval.attribution.timing import TimingResult, henriksson_merton, treynor_mazuy
 from fundeval.etl import clean, schema
@@ -443,6 +443,7 @@ def evaluate(
     style_objective: str = "variance",
     robustness: bool = True,
     factor_returns: pd.DataFrame | None = None,
+    factor_risk_free=None,
     costs: Mapping[str, Any] | None = None,
     profile: Any = None,
     benchmark_components: pd.DataFrame | None = None,
@@ -479,7 +480,10 @@ def evaluate(
     factor_returns : 因子收益（DataFrame，每列一个因子，同频小数）；给出时在“Alpha 质量”一节增加多因子
         Alpha（每期、算术年化、t、p）与各因子暴露、贡献表（attribution.factor），沿用 hac_lags 与 use_t；
         须覆盖全部共同期，否则报错。``attrs["factor_type"] == "index_proxy"``（index_proxy_factors 的输出）
-        或 labels["factor_type"] == "index_proxy" 时，口径与结论写明指数代理因子的限定语
+        或 labels["factor_type"] == "index_proxy" 时，口径与结论写明指数代理因子的限定语；为 "us_market"
+        （attribution.factor.us_market_factors 的输出，French 因子库）时写明美国市场、美元计价的限定语
+    factor_risk_free : 多因子回归使用的无风险收益（常数或序列）；缺省时与 risk_free 相同。French 因子库的
+        预设（ff3_us、carhart_us）用因子库的 RF，口径写明“因子回归无风险收益”（labels["factor_risk_free"]）
     costs : 成本输入（年化，小数）：turnover（换手率）、unit_cost（单位成交额成本，20 bp = 0.0020）、
         other_fees（其他费用）、可选 trade_cost（直接给出交易成本率，替代 2 × TO × c）、gross_alpha
         （费用前 Alpha；缺省时取报告的多因子或 CAPM 算术年化 Alpha）与 capacity（{"trade_amount",
@@ -640,13 +644,25 @@ def evaluate(
                 f"（首个 {p.index[gaps.to_numpy()][0]:%Y-%m-%d}），请缩短区间或更换因子"
             )
         fr.attrs[FACTOR_TYPE_ATTR] = factor_type
+        factor_rf = rf
+        if factor_risk_free is not None:
+            if np.isscalar(factor_risk_free):
+                factor_rf = pd.Series(float(factor_risk_free), index=p.index)
+            else:
+                factor_rf = pd.Series(factor_risk_free, dtype=float).reindex(p.index)
+                if factor_rf.isna().any():
+                    first = p.index[factor_rf.isna().to_numpy()][0]
+                    raise ValueError(
+                        f"因子回归的无风险收益未覆盖全部 {len(p)} 个共同期：缺 {int(factor_rf.isna().sum())} 期"
+                        f"（首个 {first:%Y-%m-%d}），请缩短区间"
+                    )
         try:
-            factor = factor_decomposition(p, fr, rf, hac_lags=hac_lags, use_t=use_t)
+            factor = factor_decomposition(p, fr, factor_rf, hac_lags=hac_lags, use_t=use_t)
         except ValueError as exc:
             factor_error = str(exc)
     if factor is not None:
         se = _se_label(factor.regression)
-        proxy = "；指数代理因子" if factor.index_proxy else ""
+        proxy = f"；{FACTOR_TYPE_SHORT[factor.factor_type]}" if factor.factor_type in FACTOR_TYPE_SHORT else ""
         names = "、".join(factor.contributions.index)
         add(s, "factor_alpha", "多因子 Alpha（每期）", factor.alpha, PCT, f"截距，因子 {names}{proxy}")
         add(s, "factor_alpha_annualized", "多因子 Alpha（算术年化）", factor.annualized_alpha(k), PCT, "α × K，算术口径")
@@ -804,10 +820,12 @@ def evaluate(
     scope["无风险收益"] = _rf_description(risk_free, labels)
     if factor is not None:
         scope["因子"] = labels.get("factors", "、".join(map(str, factor.contributions.index)))
-        if factor.index_proxy:
-            scope["因子类型"] = PROXY_CAVEAT
+        if factor.caveat:
+            scope["因子类型"] = factor.caveat
         if "factor_source" in labels:
             scope["因子数据源"] = labels["factor_source"]
+        if factor_risk_free is not None:
+            scope["因子回归无风险收益"] = labels.get("factor_risk_free", "调用方给出的因子无风险收益")
     scope["费用口径"] = fee_label
     if profile is not None:
         scope["费率"] = _fee_text(profile, fee_label)
@@ -824,7 +842,7 @@ def evaluate(
     if factor is None:
         reason = (
             f"回归失败：{factor_error}" if factor_error is not None
-            else "未提供因子收益（CLI 用 --factors cn_index_proxy，Python 用 factor_returns）"
+            else "未提供因子收益（CLI 用 --factors cn_index_proxy / cn_index_proxy4 / ff3_us / carhart_us，Python 用 factor_returns）"
         )
         not_done.append(("多因子分解（第五部分第 3 节）", "未做", reason))
     not_done += [
@@ -1025,8 +1043,8 @@ def conclusion(report: EvaluationReport) -> str:
             f"（算术年化 {_pct(f.annualized_alpha(k))}），t = {f.alpha_t:.2f}，p = {f.alpha_p:.3f}，"
             f"R² = {f.rsquared:.2f}，n = {f.n}，{_significance(f.alpha_t)}；{f.exposure_text()}。"
         )
-        if f.index_proxy:
-            text += f"{PROXY_CAVEAT}。"
+        if f.caveat:
+            text += f"{f.caveat}。"
         sup.append(text)
     if r.style is not None:
         top = r.style.top(2)

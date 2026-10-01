@@ -35,7 +35,9 @@ Sharpe 风格分析，``--style-window 36`` 另附滚动权重；风格指数默
 
 ``--factors cn_index_proxy`` 在“Alpha 质量”一节做多因子分解（attribution.factor）：MKT = H00300 − 无风险收益，
 SMB = H00852 − H00300，HML = H00919 − H00918，均取中证指数官网全收益指数；这是指数代理因子，
-与 Fama–French 分组构造不同。多因子回归沿用 ``--hac-lags`` 与 ``--use-t``。
+与 Fama–French 分组构造不同。``cn_index_proxy4`` 另加 UMD = 沪深300动量 H30260 − 沪深300 000300（均为价格指数，
+不做全收益替换）。``ff3_us`` / ``carhart_us`` 取 French 因子库的美国市场因子（etl.sources.french，美元计价，
+无风险收益用因子库 RF），适合投资美股的 QDII 等基金。多因子回归沿用 ``--hac-lags`` 与 ``--use-t``。
 
 命令行中的 Python 警告改为每条一行“警告：<消息>”输出到标准错误，不显示源码路径与代码行，同一条消息只显示一次；
 ``--quiet`` 关闭警告输出。取数与评价阶段的警告同时写入报告附注（已在附注中的不重复写入），``--quiet`` 不影响附注。
@@ -54,7 +56,7 @@ from pathlib import Path
 
 from fundeval._console import console_print, console_safe, console_write
 from fundeval._version import __version__
-from fundeval.attribution.factor import FACTOR_PRESETS
+from fundeval.attribution.factor import FACTOR_PRESET_NAMES
 from fundeval.etl import schema
 from fundeval.etl.fx import FX_CONVERT, FX_MODES
 from fundeval.etl.benchmark import DEMAND_DEPOSIT_RATE, DEPOSIT_RATE_SOURCE, STYLE_PRESETS, TIME_DEPOSIT_RATE
@@ -244,9 +246,11 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
         "指数按 --index-return-type 默认换成全收益代码",
     )
     p.add_argument(
-        "--factors", choices=tuple(FACTOR_PRESETS),
+        "--factors", choices=FACTOR_PRESET_NAMES,
         help="多因子分解的因子预设：cn_index_proxy（MKT = H00300 − rf，SMB = H00852 − H00300，HML = H00919 − H00918，"
-        "指数代理因子，与学术因子不可直接比较）；回归沿用 --hac-lags 与 --use-t",
+        "指数代理因子，与学术因子不可直接比较）；cn_index_proxy4（再加 UMD = 沪深300动量 H30260 − 沪深300 000300，"
+        "两者均为价格指数）；ff3_us、carhart_us（French 因子库的美国市场因子 MKT、SMB、HML 及 UMD，美元计价，"
+        "无风险收益用因子库 RF，适合投资美股的 QDII，只支持 --freq M）；回归沿用 --hac-lags 与 --use-t",
     )
     p.add_argument("--style-window", type=int, help="滚动风格分析的窗口期数（不小于风格资产数 + 2）")
     p.add_argument("--mar", type=float, help="Sortino 的最低可接受收益（每期，小数）；缺省取无风险收益")

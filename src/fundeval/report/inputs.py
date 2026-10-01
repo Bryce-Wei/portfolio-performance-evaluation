@@ -14,7 +14,17 @@ from typing import Any
 
 import pandas as pd
 
-from fundeval.attribution.factor import FACTOR_DESCRIPTIONS, FACTOR_PRESETS, INDEX_PROXY, index_proxy_factors, preset_codes
+from fundeval.attribution.factor import (
+    FACTOR_DESCRIPTIONS,
+    FACTOR_PRESET_NAMES,
+    FACTOR_PRESETS,
+    INDEX_PROXY,
+    US_FACTOR_PRESETS,
+    US_MARKET,
+    index_proxy_factors,
+    preset_codes,
+    us_market_factors,
+)
 from fundeval.etl import fx as fx_mod
 from fundeval.etl import schema
 from fundeval.etl.benchmark import (
@@ -315,11 +325,15 @@ def _style_from_akshare(spec, start, end, freq, cache, risk_free, index, *, retu
 
 
 def _factors_from_akshare(preset, start, end, freq, cache, risk_free, index, *, source="auto"):
-    """联网取因子预设用到的全收益指数并构造指数代理因子，返回 (因子收益表, labels 补充)。"""
+    """联网取因子预设用到的指数并构造指数代理因子，返回 (因子收益表, labels 补充)。
+
+    预设中的代码按原样取数，不做全收益替换（--index-return-type 只作用于基准与风格指数）：
+    cn_index_proxy4 的 UMD 两条腿 H30260 与 000300 都是价格指数，保证分红口径一致。
+    """
     from fundeval.etl.sources import akshare as aks
 
     if preset not in FACTOR_PRESETS:
-        raise ValueError(f"未知的因子预设 {preset!r}，可选：{'、'.join(FACTOR_PRESETS)}")
+        raise ValueError(f"未知的因子预设 {preset!r}，可选：{'、'.join(FACTOR_PRESET_NAMES)}")
     comps, sources = {}, []
     for code in preset_codes(preset):
         r = aks.index_returns(code, start, end, source=source, freq=None if freq == "D" else freq, **cache)
@@ -336,6 +350,30 @@ def _factors_from_akshare(preset, start, end, freq, cache, risk_free, index, *, 
         "factor_source": "；".join(sources),
     }
     return factors, labels
+
+
+def _factors_from_french(preset, start, end, freq, cache, index):
+    """从 French 因子库取美国市场因子（ff3_us、carhart_us），返回 (因子收益表, 因子回归无风险收益 RF, labels 补充)。
+
+    因子库只有月度与年度数据，``freq`` 须为 M 或 A；因子以日历期末为索引，与基金收益的期末日期对齐。
+    """
+    from fundeval.etl.sources import french
+
+    key = str(freq).upper()[:1]
+    if key not in ("M", "A"):
+        raise ValueError(f"--factors {preset} 只支持 --freq M（或 A）：French 因子库只提供月度与年度数据，收到 {freq!r}")
+    library = french.carhart_factors(key, **_cache_kwargs(cache))
+    library = library.loc[pd.Timestamp(start) if start else None : pd.Timestamp(end) if end else None]
+    library = library.loc[library.index.intersection(pd.DatetimeIndex(index))]
+    factors, rf = us_market_factors(library, preset)
+    desc = FACTOR_DESCRIPTIONS.get(preset, {})
+    labels = {
+        "factors": f"{preset}：" + "；".join(f"{name} = {desc.get(name, name)}" for name in factors.columns),
+        "factor_type": US_MARKET,
+        "factor_source": library.attrs.get("source_label", french.SOURCE_LABEL),
+        "factor_risk_free": "French 因子库的 RF（美国 1 个月国库券收益，美元，每期）",
+    }
+    return factors, rf, labels
 
 
 #: --benchmark 取基金合同业绩比较基准的写法
@@ -651,10 +689,20 @@ def build_report_inputs(opts) -> dict:
         notes += style_notes
 
     factor_returns = None
+    factor_risk_free = None
     if opts.factors:
-        factor_returns, factor_labels = _factors_from_akshare(
-            opts.factors, opts.start, opts.end, freq, cache, risk_free, portfolio.index, source=opts.index_source
-        )
+        if opts.factors in US_FACTOR_PRESETS:
+            factor_returns, factor_risk_free, factor_labels = _factors_from_french(
+                opts.factors, opts.start, opts.end, freq, cache, portfolio.index
+            )
+            notes.append(
+                f"多因子分解使用美国市场因子（{opts.factors}），回归的超额收益按因子库 RF（美元）计算；"
+                "基金收益为人民币计价，回归残差与 Alpha 含人民币兑美元汇率变动的影响。"
+            )
+        else:
+            factor_returns, factor_labels = _factors_from_akshare(
+                opts.factors, opts.start, opts.end, freq, cache, risk_free, portfolio.index, source=opts.index_source
+            )
         labels.update(factor_labels)
 
     targets = None
@@ -678,6 +726,7 @@ def build_report_inputs(opts) -> dict:
         style_returns=style_returns,
         style_window=opts.style_window,
         factor_returns=factor_returns,
+        factor_risk_free=factor_risk_free,
         profile=profile,
         benchmark_components=components,
     )

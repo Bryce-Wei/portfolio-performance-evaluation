@@ -19,6 +19,7 @@
 | `fund_overview_em_110011.csv`、`_110020.csv`、`_000001.csv` | `fund_overview_em(symbol=...)`：1 行 18 列。基金类型与业绩比较基准为真实文本；全称、简称、成立日期/规模（110011 的一行取自真实写法）、规模、管理人、托管人、基金经理、分红、费率等为构造，写法与真实返回一致 |
 | `index_csindex_all.csv` | `index_csindex_all()`：只录制上面列出的 8 行；代码、简称、全称、币种为真实，基日、点位、近一个月收益率等为构造。真实表约 2370 行，全收益指数（如 H00300）不在表中 |
 | `fund_open_fund_info_em_110020_*.csv`、`_000001_*.csv` | 110020、000001 的单位净值（由 H00300 / H30355 的构造日收益乘系数加扰动生成）与空的分红表，全部为构造 |
+| `stock_zh_index_hist_csindex_H30260.csv` | `stock_zh_index_hist_csindex(symbol="H30260", ...)`：沪深300动量（价格指数），供 `cn_index_proxy4` 的 UMD 测试。代码、全称与简称为真实（中证指数目录），收盘价由 000300 样本的日收益乘 1.15 加固定种子的随机扰动构造，不是真实行情 |
 | `stock_zh_index_hist_csindex_H11164.csv`、`_H30355.csv` | 中证香港300、中证800成长的收盘价，由 H00300 的日收益乘系数加扰动构造，不是真实行情 |
 | `bond_composite_index_cbond_全价_总值.csv` | `bond_composite_index_cbond(indicator="全价", period="总值")`，由财富指数样本缩放构造 |
 | `bond_composite_index_cbond_财富_总值.csv` | `bond_composite_index_cbond(indicator="财富", period="总值")` |

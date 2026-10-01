@@ -8,7 +8,6 @@ from urllib.parse import quote
 
 import pandas as pd
 
-from fundeval.attribution.factor import PROXY_CAVEAT
 from fundeval.report.summary import SECTIONS, STYLE_CAVEAT, EvaluationReport, conclusion, format_value
 
 
@@ -172,8 +171,8 @@ def to_markdown(report: EvaluationReport, path: str | Path | None = None, *, cha
         parts += ["", "## 回归系数", "", "系数为每期值，与输入收益同频。", "", _md_table(reg)]
     if report.factor is not None:
         intro = "贡献 = 因子系数 × 因子均值，算术年化乘以 K；各因子贡献、Alpha 与残差之和等于组合平均超额收益。"
-        if report.factor.index_proxy:
-            intro += f"{PROXY_CAVEAT}。"
+        if report.factor.caveat:
+            intro += f"{report.factor.caveat}。"
         parts += [
             "", "## 多因子暴露与贡献", "", intro, "", _md_table(_factor_display(report)),
             "", "收益对账：", "", _md_table(_factor_reconciliation_display(report)),
@@ -292,8 +291,8 @@ def _write_excel(report, path, scope, metrics, regression, data, quality, issues
             report.factor_reconciliation().rename_axis("项目").to_excel(
                 writer, sheet_name="多因子", startrow=len(ftbl) + 2
             )
-            if report.factor.index_proxy:
-                pd.DataFrame({"说明": [PROXY_CAVEAT]}).to_excel(
+            if report.factor.caveat:
+                pd.DataFrame({"说明": [report.factor.caveat]}).to_excel(
                     writer, sheet_name="多因子", index=False, startrow=len(ftbl) + len(report.factor_reconciliation()) + 5
                 )
         if report.robustness is not None:
