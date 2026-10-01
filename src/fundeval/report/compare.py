@@ -230,7 +230,7 @@ def _row(code: str, rep: EvaluationReport | None, profile, error: str | None, k:
             "；".join(f"{name} {w:.1%}" for name, w in rep.style.top(2).items())
             if rep is not None and rep.style is not None else ""
         )
-    row["数据质量问题数"] = len(rep.quality.issues()) if rep is not None else nan
+    row["数据质量问题数"] = len(rep.quality.data_issues()) if rep is not None else nan  # 样本较短另在“标注”列
     marks = []
     if rep is not None and rep.short_sample:
         marks.append(f"样本不足 {SHORT_SAMPLE_YEARS * 12} 个月（{rep.n} 期）")

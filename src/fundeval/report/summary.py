@@ -1157,7 +1157,7 @@ def conclusion(report: EvaluationReport) -> str:
             f"持续监控：风险倍数 {format_value(r.monitoring['risk_multiple'], RATIO)}，z 值 {format_value(r.monitoring['z'], RATIO)}，"
             f"当前分区 {status}（阈值为演示值，须按策略校准）。"
         )
-    issues = r.quality.issues()
+    issues = r.quality.data_issues()  # 样本长度另由下面的“样本较短”一句说明
     if issues:
         ver.append(f"数据质量有 {len(issues)} 项需复核（见数据质量报告），结论须在复核后确认。")
     else:

@@ -117,10 +117,15 @@ class QualityReport:
         return n
 
     def issues(self) -> list[str]:
-        """逐条列出需要复核的问题（中文），没有问题时返回空列表。"""
+        """逐条列出需要复核的问题（中文），没有问题时返回空列表；样本较短时第一条为样本长度提示。"""
         out: list[str] = []
         if self.short_sample:
             out.append(sample_length_issue(self.periods, self.periods_per_year, self.min_years))
+        return out + self.data_issues()
+
+    def data_issues(self) -> list[str]:
+        """数据本身的问题（缺失、异常、停牌或估值滞后、交叉核对差异与附加说明），不含样本长度提示。"""
+        out: list[str] = []
         for col, row in self.missing.iterrows():
             if row["missing"]:
                 out.append(f"{col} 缺失 {int(row['missing'])} 期（首个缺失 {row['first_missing']:%Y-%m-%d}），未填补")

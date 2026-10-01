@@ -109,11 +109,14 @@
 | 样本起 | 2025-01-31 |
 | 样本止 | 2025-12-31 |
 | 期数 | 12 |
+| 样本长度（不少于 36 期） | 样本较短，统计推断与能力判断受限 |
 | 缺失期数（portfolio） | 0 |
 | 缺失期数（benchmark） | 0 |
 | 异常收益（稳健 z 值） | 0 |
 | 疑似停牌或估值滞后区间 | 0 |
 | 净值与日增长率交叉核对 | 未提供核对数据 |
+
+- 样本较短（12 期，月度少于 36 期，即不足 3 年），统计推断与能力判断受限
 
 ## 附注
 
@@ -134,7 +137,7 @@
 | 检验 | 状态 | 原因 |
 | --- | --- | --- |
 | 风格分析（第五部分第 1 节） | 未做 | 未提供风格指数收益（CLI 用 --style，Python 用 style_returns） |
-| 多因子分解（第五部分第 3 节） | 未做 | 未提供因子收益（CLI 用 --factors cn_index_proxy，Python 用 factor_returns） |
+| 多因子分解（第五部分第 3 节） | 未做 | 未提供因子收益（CLI 用 --factors cn_index_proxy / cn_index_proxy4 / ff3_us / carhart_us，Python 用 factor_returns） |
 | Brinson 归因（第五部分第 2 节） | 未做 | 需要持仓与行业权重；持仓齐备后可用 fundeval.attribution.brinson |
 | 样本外检验（第四部分第 3 节） | 未做 | 报告只做全样本估计；样本外须事前规定切分点（alpha.rolling.split_in_out_of_sample） |
 | 扣费后净 Alpha（第六部分） | 未做 | 当前为费用后净值；未给出换手率与成本（Python 用 costs，见 fundeval.costs） |

@@ -198,3 +198,5 @@ def test_evaluate_quality_flags_short_worked_example(worked_example):
     rep = evaluate(worked_example, periods_per_year=12)
     assert rep.quality.short_sample
     assert any("样本较短（12 期，月度少于 36 期" in i for i in rep.quality.issues())
+    # 结论中样本长度由“样本较短”一句说明，不计入“数据质量有 N 项需复核”
+    assert rep.quality.data_issues() == [] and "数据质量检查未发现" in rep.conclusion()
