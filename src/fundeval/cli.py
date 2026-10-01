@@ -39,6 +39,10 @@ SMB = H00852 − H00300，HML = H00919 − H00918，均取中证指数官网全�
 不做全收益替换）。``ff3_us`` / ``carhart_us`` 取 French 因子库的美国市场因子（etl.sources.french，美元计价，
 无风险收益用因子库 RF），适合投资美股的 QDII 等基金。多因子回归沿用 ``--hac-lags`` 与 ``--use-t``。
 
+``--config <文件.toml>``（report 与 compare）先读取评价口径配置（fundeval.config，示例 examples/config.toml），
+再用命令行显式给出的参数覆盖；报告口径写明“配置来源：<文件>（命令行覆盖：…）”。配置中没有对应命令行参数的
+置信水平、稳健性开关与日度 K 直接传给 evaluate。
+
 命令行中的 Python 警告改为每条一行“警告：<消息>”输出到标准错误，不显示源码路径与代码行，同一条消息只显示一次；
 ``--quiet`` 关闭警告输出。取数与评价阶段的警告同时写入报告附注（已在附注中的不重复写入），``--quiet`` 不影响附注。
 Python API（evaluate、compare 等）的 warnings 行为不变。``--version`` 显示版本号。
@@ -149,6 +153,10 @@ def cmd_report(args, log: WarningLog | None = None) -> int:
     with aks.collect_notes() as source_notes:
         inputs = build_report_inputs(ReportOptions.from_namespace(args))
     inputs["notes"] = source_notes + inputs["notes"]
+    config = getattr(args, "config_obj", None)
+    if config is not None:
+        inputs.update(config.evaluate_kwargs())
+        inputs["labels"]["config_source"] = args.config_label
     report = evaluate(**inputs)
     _merge_notes(report.notes, log.since(start))
     out = args.out
@@ -171,9 +179,13 @@ def cmd_compare(args, log: WarningLog | None = None) -> int:
     _check_charts(args)
     codes = [c.strip() for c in args.funds.replace("，", ",").split(",") if c.strip()]
     opts = ReportOptions.from_namespace(args, fund=None, input=None)
+    config = getattr(args, "config_obj", None)
+    extra = config.evaluate_kwargs() if config is not None else {}
     start = len(log.messages)
     result = compare(codes, args.start, args.end, freq=args.freq, benchmark=args.benchmark or "contract",
-                     sort=args.sort, options=opts)
+                     sort=args.sort, options=opts, **extra)
+    if config is not None:
+        result.scope["配置来源"] = args.config_label
     _merge_notes(result.notes, log.since(start))
     out = args.out
     if out is None:
@@ -230,6 +242,11 @@ def _add_benchmark_args(p: argparse.ArgumentParser, *, compare_mode: bool = Fals
 
 
 def _add_common_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--config",
+        help="评价口径配置文件（TOML，见 examples/config.toml）：先读配置，再用命令行显式给出的参数覆盖；"
+        "未知键报错",
+    )
     p.add_argument("--start", help="起始日期，如 2021-01-01")
     p.add_argument("--end", help="截止日期，如 2025-12-31")
     p.add_argument("--freq", default="M", help="评价频率 D/W/M/Q（默认 M）")
@@ -339,12 +356,65 @@ def _one_line(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def _explicit_dests(argv: Sequence[str]) -> set[str]:
+    """命令行中显式给出的参数（argparse 的 dest）：把全部默认值换成 SUPPRESS 后重新解析，留下的就是显式给出的。"""
+    parser = build_parser()
+
+    def suppress(p: argparse.ArgumentParser) -> None:
+        for action in p._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for sub in action.choices.values():
+                    suppress(sub)
+            elif action.dest not in ("help", "version"):
+                action.default = argparse.SUPPRESS
+        p._defaults.clear()
+
+    suppress(parser)
+    return set(vars(parser.parse_args(list(argv))))
+
+
+def _option_names(command: str) -> dict[str, str]:
+    """子命令的 {dest: 选项写法}，如 {"freq": "--freq", "no_cache": "--no-cache"}。"""
+    parser = build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices[command]
+    return {a.dest: max(a.option_strings, key=len) for a in sub._actions if a.option_strings}
+
+
+def apply_config(args, argv: Sequence[str]) -> None:
+    """``--config`` 给出时读取配置文件，命令行未显式给出的参数取配置中的值（显式给出的保留）。
+
+    在 args 上记录 ``config_obj``（EvaluationConfig，或 None）与 ``config_label``
+    （“<文件>（命令行覆盖：--freq、--rf）”，写入报告口径“配置来源”）。
+    """
+    args.config_obj = None
+    path = getattr(args, "config", None)
+    if not path:
+        return
+    from fundeval.config import load_config
+
+    config = load_config(path)
+    explicit = _explicit_dests(argv)
+    names = _option_names(args.command)
+    overridden = []
+    for dest, value in config.cli_values().items():
+        if not hasattr(args, dest):  # 子命令没有的参数（如 compare 的监控目标）
+            continue
+        if dest in explicit:
+            overridden.append(names.get(dest, dest))
+            continue
+        setattr(args, dest, value)
+    args.config_obj = config
+    args.config_label = f"{path}（命令行覆盖：{'、'.join(overridden) if overridden else '无'}）"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     log = WarningLog(quiet=getattr(args, "quiet", False))
     try:
         with log.capture():
+            apply_config(args, argv)
             return args.func(args, log)
     except Exception as exc:
         if _is_network_error(exc):

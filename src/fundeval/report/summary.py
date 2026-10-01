@@ -423,30 +423,45 @@ def _fmt_date(value) -> str:
     return value if isinstance(value, str) else f"{pd.Timestamp(value):%Y-%m-%d}"
 
 
+class _Unset:
+    """evaluate 参数的“未给出”标记：与 config 同时使用时区分调用方是否显式给出（显式给出者优先）。"""
+
+    def __init__(self, default):
+        self.default = default
+
+    def __repr__(self) -> str:
+        return repr(self.default)
+
+
+def _given(value) -> bool:
+    return not isinstance(value, _Unset)
+
+
 def evaluate(
     returns,
     benchmark=None,
     risk_free=0.0,
-    periods_per_year: int = 12,
+    periods_per_year: int = _Unset(12),
     *,
     market=None,
-    mar=None,
-    hac_lags: int | None = None,
-    monitor_targets: Mapping[str, float] | None = None,
+    mar=_Unset(None),
+    hac_lags: int | None = _Unset(None),
+    monitor_targets: Mapping[str, float] | None = _Unset(None),
     labels: Mapping[str, str] | None = None,
     cross_check: pd.DataFrame | None = None,
-    confidence: float = 0.95,
-    use_t: bool | None = None,
+    confidence: float = _Unset(0.95),
+    use_t: bool | None = _Unset(None),
     notes: list[str] | tuple[str, ...] | None = None,
     style_returns: pd.DataFrame | None = None,
     style_window: int | None = None,
     style_objective: str = "variance",
-    robustness: bool = True,
+    robustness: bool = _Unset(True),
     factor_returns: pd.DataFrame | None = None,
     factor_risk_free=None,
     costs: Mapping[str, Any] | None = None,
     profile: Any = None,
     benchmark_components: pd.DataFrame | None = None,
+    config=None,
 ) -> EvaluationReport:
     """生成评价报告（正文第九、十部分）。
 
@@ -495,12 +510,49 @@ def evaluate(
         QDII 基金在结论与附注中提示汇率与境外市场的影响
     benchmark_components : 合同基准的解析结果表（etl.benchmark.resolution_table），口径中列出，
         Markdown 与 Excel 另附“基准解析”表
+    config : fundeval.config.EvaluationConfig（评价口径，正文第一部分第 1 节）；给出时，未显式给出的
+        periods_per_year（config.k）、mar、hac_lags、use_t、confidence、robustness 与 monitor_targets 取自
+        config，labels 未写 fees 时取 config.fees；config 给出 start / end 时先把组合、基准、市场、无风险收益
+        截取到该区间（不做频率转换，收益须已是 config.freq 的频率）。关键字参数与 config 同时给出时，
+        关键字参数优先。口径写明“配置来源”（labels["config_source"]，缺省为 config.source）
 
     组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。口径中写明
     “组合 N 期、基准 M 期、共同 K 期”，有期数被丢弃时在附注中列出其起止日期；
     数据质量报告按日期并集统计缺失。
     """
     labels = dict(labels or {})
+    if config is not None:
+        cfg_values = {
+            "periods_per_year": config.k, "mar": config.mar, "hac_lags": config.hac_lags,
+            "use_t": True if config.use_t else None, "confidence": config.confidence,
+            "robustness": config.robustness, "monitor_targets": config.monitor_targets,
+        }
+    else:
+        cfg_values = {}
+
+    def pick(name, value):
+        if _given(value):
+            return value
+        return cfg_values[name] if name in cfg_values else value.default
+
+    periods_per_year = pick("periods_per_year", periods_per_year)
+    mar = pick("mar", mar)
+    hac_lags = pick("hac_lags", hac_lags)
+    use_t = pick("use_t", use_t)
+    confidence = pick("confidence", confidence)
+    robustness = pick("robustness", robustness)
+    monitor_targets = pick("monitor_targets", monitor_targets)
+    if config is not None:
+        labels.setdefault("fees", config.fees)
+        labels.setdefault("config_source", config.describe())
+        if config.start or config.end:
+            sample = slice(pd.Timestamp(config.start) if config.start else None,
+                           pd.Timestamp(config.end) if config.end else None)
+
+            def cut(obj):
+                return obj.loc[sample] if isinstance(obj, (pd.Series, pd.DataFrame)) else obj
+
+            returns, benchmark, market, risk_free = cut(returns), cut(benchmark), cut(market), cut(risk_free)
     k = int(periods_per_year)
     p_raw, benchmark, risk_free, market = _as_frame(returns, benchmark, risk_free, market)
 
@@ -832,6 +884,8 @@ def evaluate(
     if profile is not None and profile.is_qdii:
         notes.append(QDII_NOTE + "。")
     scope["比率口径"] = "同频算术均值与样本标准差（n−1），乘以 √K 年化；累计与年化收益为几何口径"
+    if "config_source" in labels:
+        scope["配置来源"] = labels["config_source"]
     if market_proxy:
         notes.append("未提供市场收益，Treynor、CAPM 与择时回归以基准代替市场。")
 

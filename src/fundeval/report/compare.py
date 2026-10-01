@@ -253,15 +253,26 @@ def _sort(table: pd.DataFrame, sort: str) -> pd.DataFrame:
     return pd.concat([ranked.drop(columns="_v"), table[~eligible]], ignore_index=True)
 
 
+class _Unset:
+    """compare 参数的“未给出”标记：与 config 同时使用时区分调用方是否显式给出（显式给出者优先）。"""
+
+    def __init__(self, default):
+        self.default = default
+
+    def __repr__(self) -> str:
+        return repr(self.default)
+
+
 def compare(
     codes: Sequence[str],
-    start,
-    end,
-    freq: str = "M",
-    benchmark: str = CONTRACT,
+    start=_Unset(None),
+    end=_Unset(None),
+    freq: str = _Unset("M"),
+    benchmark: str = _Unset(CONTRACT),
     *,
     sort: str | None = None,
     options: ReportOptions | None = None,
+    config=None,
     **kwargs,
 ) -> ComparisonReport:
     """多基金横向对比：每只基金同一区间、同一无风险收益，逐只 evaluate，汇总成对比表。
@@ -276,6 +287,9 @@ def compare(
     options : ReportOptions（取数选项，如 rf、factors、style、benchmark_map、缓存与超时）
     kwargs : ReportOptions 的字段（如 ``rf="cgb2y"``、``factors="cn_index_proxy"``、``benchmark_map={...}``、
         ``hac_lags=3``）并入 options；其余参数原样传给 evaluate（如 ``costs``、``robustness``）
+    config : fundeval.config.EvaluationConfig（评价口径）；给出时取数选项（区间、频率、基准、无风险收益、风格、
+        因子、缓存与超时等）与 evaluate 的 confidence、robustness、K 取自 config，显式给出的 start、end、freq、
+        benchmark 与 kwargs 优先；不能与 options 同时给出。对比表口径写明“配置来源”
 
     无风险收益只取一次（常数或按 rf 的来源），各基金按所属期对齐，保证口径一致；取不到时整体报错。
     单只基金取数或评价失败时记录原因（写入对比表“失败原因”列）并继续，不中断整体。
@@ -290,17 +304,33 @@ def compare(
         raise ValueError(f"基金代码重复：{codes}")
     if sort is not None and sort not in SORT_KEYS:
         raise ValueError(f"sort 须为 {'、'.join(SORT_KEYS)} 之一，收到 {sort!r}")
+    if config is not None and options is not None:
+        raise ValueError("config 与 options 不能同时给出：取数选项写在 config 中，或用关键字参数覆盖")
     option_names = {f.name for f in dataclasses.fields(ReportOptions)}
     opt_kw = {k: v for k, v in kwargs.items() if k in option_names}
     evaluate_kwargs = {k: v for k, v in kwargs.items() if k not in option_names}
+    if config is not None:
+        base = config.report_options()
+        evaluate_kwargs = {**config.evaluate_kwargs(), **evaluate_kwargs}
+        cfg_defaults = {"start": config.start, "end": config.end, "freq": config.freq,
+                        "benchmark": config.benchmark or CONTRACT}
+    else:
+        base = options or ReportOptions()
+        cfg_defaults = {}
+
+    def pick(name, value):
+        if not isinstance(value, _Unset):
+            return value
+        return cfg_defaults.get(name, value.default)
+
     opts = dataclasses.replace(
-        options or ReportOptions(), **opt_kw, start=start, end=end, freq=freq,
-        benchmark=benchmark, fund=None, input=None,
+        base, **opt_kw, start=pick("start", start), end=pick("end", end), freq=pick("freq", freq),
+        benchmark=pick("benchmark", benchmark), fund=None, input=None,
     )
     if sort == "factor_alpha" and not opts.factors:
         raise ValueError("按多因子 Alpha 排序须给出 factors（如 cn_index_proxy）")
     freq_u = opts.freq.upper()
-    k = schema.periods_per_year(freq_u)
+    k = int(evaluate_kwargs.get("periods_per_year", schema.periods_per_year(freq_u)))
     notes: list[str] = []
 
     # 同一无风险收益：只取一次
@@ -365,6 +395,8 @@ def compare(
     )
     if opts.style:
         scope["风格指数"] = "auto（按各基金的基金类型选择预设，见“风格预设”列）" if opts.style.strip().lower() == "auto" else opts.style
+    if config is not None:
+        scope["配置来源"] = config.describe()
     return ComparisonReport(table=table, reports=reports, failures=failures, profiles=profiles, scope=scope,
                             sort=sort, notes=notes)
 

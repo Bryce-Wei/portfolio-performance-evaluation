@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "statsmodels>=0.14",
+    "tomli>=1.1; python_version < '3.11'",  # 读取评价口径配置（fundeval.config）；3.11 起用标准库 tomllib
 ]
 
 [project.optional-dependencies]
