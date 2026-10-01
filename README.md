@@ -4,6 +4,76 @@
 
 仓库包含正文（[docs/投资组合绩效评估.md](docs/投资组合绩效评估.md)）与按正文章节组织的 Python 工具包 `fundeval`（`src/fundeval/`）：输入基金代码或本地收益表，生成含口径、各维度指标、回归、归因、数据质量与三段结论的评价报告（Markdown / Excel，可附图表），也可多基金横向对比。当前版本 0.2.0，变更见 [CHANGELOG.md](CHANGELOG.md)。
 
+## 开发进度
+
+最后更新：2026-10-01（main 分支，PR #1 – #12 已合并）。下方仓库结构中的各项均已完成，方法覆盖正文全部十个部分。
+
+状态：✅ 已完成　🟡 部分完成　⬜ 未开始
+
+| 路径 | 内容 | 正文 | 状态 | PR |
+| --- | --- | --- | --- | --- |
+| **项目文件** |  |  |  |  |
+| `README.md` | 快速开始、功能与正文对照、口径与详细用法 | — | ✅ 已完成 | #11 |
+| `CHANGELOG.md` | 更新日志 | — | ✅ 已完成 | #11 |
+| `pyproject.toml` | 包配置与依赖；可选依赖 data / excel / plot / test | — | ✅ 已完成 | #1 |
+| `.github/workflows/tests.yml` | CI：Python 3.10–3.12 运行 pytest 与 quickstart | — | ✅ 已完成 | #2 |
+| **docs/** |  |  |  |  |
+| `投资组合绩效评估.md` / `.docx` | 正文与 Word 修订稿 v1 | 全文 | ✅ 已完成 | 初始提交 |
+| `assets/` | 正文案例图 | 五 | ✅ 已完成 | 初始提交 |
+| `docs/examples/` | quickstart 生成的示例报告与图表 | 九 | ✅ 已完成 | #11 |
+| **src/fundeval/** |  |  |  |  |
+| `cli.py` | 命令行：report 一键评价，compare 横向对比 | 九、十 | ✅ 已完成 | #4 #9 |
+| `__main__.py` | python -m fundeval | — | ✅ 已完成 | #11 |
+| `config.py` | 评价口径：EvaluationConfig 与 TOML 配置读取 | 一.1 | ✅ 已完成 | #12 |
+| `_version.py` · `_utils.py` · `_console.py` | 版本号、内部工具、命令行输出编码 | — | ✅ 已完成 | #1 #11 |
+| **etl/**（数据前期准备） |  |  |  |  |
+| `schema.py` | 标准数据结构与校验：收益表、净值、现金流、持仓、成交 | 一.2 | ✅ 已完成 | #1 #12 |
+| `sources/files.py` | CSV / Excel 导入 | 一.2 | ✅ 已完成 | #1 |
+| `sources/akshare.py` | 基金净值与分红、基金概况、指数、无风险利率、汇率 | 一.2 | ✅ 已完成 | #4 – #10 |
+| `sources/french.py` | Fama-French 因子库：美国市场三因子与动量 | 五.3 | ✅ 已完成 | #12 |
+| `benchmark.py` | 合同基准解析、全收益指数映射、复合基准、风格预设 | 一.1 | ✅ 已完成 | #4 #5 #9 |
+| `fx.py` | 外币指数收益换算为人民币 | 一.1 | ✅ 已完成 | #10 |
+| `clean.py` | 日期对齐、币种统一、现金流识别、缺失与异常复核 | 一.2 | ✅ 已完成 | #1 #12 |
+| `returns.py` | 净值 / 价格加分红 / 资产值 → 单期收益；频率转换 | 二.1 | ✅ 已完成 | #1 #4 |
+| `quality.py` | 数据质量报告：缺失、异常、停牌、样本长度、净值核对 | 一.2 | ✅ 已完成 | #4 #12 |
+| **分析模块** |  |  |  |  |
+| `returns.py` | TWR、MWR/XIRR、年化、累计差额与几何相对收益 | 二 | ✅ 已完成 | #1 #2 |
+| `risk.py` | 波动率、最大回撤、Sharpe、TE、IR、Treynor、M² | 三 | ✅ 已完成 | #1 |
+| `tail.py` | 下行偏差、Sortino、Calmar、历史 VaR / ES | 八 | ✅ 已完成 | #2 |
+| `alpha/regression.py` | CAPM / 多因子回归，Newey-West 稳健 t 值 | 四.2 | ✅ 已完成 | #3 |
+| `alpha/rolling.py` | 滚动 Alpha、Beta、IR，样本外切分 | 四.3 | ✅ 已完成 | #3 |
+| `alpha/robustness.py` | 剔除异常期后重估 CAPM、TM、HM | 四.3 | ✅ 已完成 | #7 #8 |
+| `alpha/fundamental.py` | IC、有效广度、主动管理基本定律 | 四.1 | ✅ 已完成 | #3 |
+| `attribution/style.py` | Sharpe 风格分析，含滚动 | 五.1 | ✅ 已完成 | #7 |
+| `attribution/brinson.py` | BHB / BF 单期归因 + Cariño 多期链接 | 五.2 | ✅ 已完成 | #3 |
+| `attribution/factor.py` | 四因子：A 股指数代理与 Fama-French | 五.3 | ✅ 已完成 | #8 #12 |
+| `attribution/campisi.py` | 固收：收入 / 利率 / 利差 / 剩余 | 五.4 | ✅ 已完成 | #8 |
+| `attribution/timing.py` | TM、HM 择时模型 | 五.5 | ✅ 已完成 | #3 |
+| `costs.py` | 换手率、交易成本、净 Alpha、容量敏感性 | 六 | ✅ 已完成 | #8 |
+| `monitor.py` | 滚动 TE、风险倍数、z 值、Green / Yellow / Red 分区 | 七 | ✅ 已完成 | #2 |
+| **report/**（汇总与结论） |  |  |  |  |
+| `inputs.py` | 取数与组装：基金代码或本地文件 → 评价输入 | 九 | ✅ 已完成 | #9 |
+| `summary.py` | 一键评价：六个维度、回归、稳健性与三段式结论 | 九、十 | ✅ 已完成 | #4 |
+| `compare.py` | 多基金横向对比（不做综合打分） | 十 | ✅ 已完成 | #9 |
+| `charts.py` | 图表：财富指数、回撤、滚动超额与 TE、风格权重 | 九 | ✅ 已完成 | #10 |
+| `export.py` | 导出 Excel / Markdown 报告 | 九、十 | ✅ 已完成 | #4 |
+| **tests/ 与 examples/** |  |  |  |  |
+| `tests/` | 基准测试：累计收益 10.2058%、IR 2.2327 等 | 九 | ✅ 已完成 | #1 起 |
+| `tests/data/` · `fake_akshare.py` | 演示数据、真实格式样本、离线模拟 akshare | — | ✅ 已完成 | #1 #4 |
+| `examples/quickstart.py` | 离线：演示数据 → 完整报告 | 九 | ✅ 已完成 | #11 |
+| `examples/walkthrough.ipynb` | 离线 notebook：按正文顺序从净值到结论 | 一 – 十 | ✅ 已完成 | #12 |
+| `examples/config.toml` | 评价口径配置示例，用于 --config | 一.1 | ✅ 已完成 | #12 |
+| `examples/fund_code.md` | 联网：真实基金代码的命令与数据源替代办法 | — | ✅ 已完成 | #11 |
+
+### 待完成
+
+| 事项 | 状态 | 说明 |
+| --- | --- | --- |
+| 发布 v0.2.0 | ⬜ 未开始 | CHANGELOG 中 0.2.0 与“未发布”两节的改动尚未打 tag 发布 |
+| Brinson 归因的数据来源 | 🟡 方法已完成 | 需自备行业持仓与基准行业权重；尚无自动取数 |
+| 资金加权收益 MWR 的数据来源 | 🟡 方法已完成 | 需自备申购赎回现金流；尚无自动取数 |
+| 交易成本与容量的数据来源 | 🟡 方法已完成 | 需自备成交记录与日均成交额；尚无自动取数 |
+
 ## 快速开始
 
 **安装**（Python ≥ 3.10）：
