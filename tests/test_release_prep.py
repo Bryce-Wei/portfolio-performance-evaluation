@@ -404,9 +404,14 @@ def test_fund_code_examples_cover_options():
 def test_changelog_structure():
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert re.search(r"^## \[?0\.2\.0\]?", text, re.M)
-    section = text.split("## ", 2)[1] if text.startswith("## ") else text.split("\n## ", 2)[1]
+    sections = {block.split("\n", 1)[0]: block for block in text.split("\n## ")[1:]}
+    release = next(body for head, body in sections.items() if head.startswith("[0.2.0]"))
     for heading in ("### 新增", "### 修正", "### 口径与限定"):
-        assert heading in section
+        assert heading in release
+    # 最上面一节为尚未发布的改动（新版本发布时改为版本号与日期）
+    first = text.split("\n## ", 1)[1]
+    assert first.startswith("[未发布]") or first.startswith("[0.2.0]")
+    assert "### 新增" in first
     for n in range(1, 11):
         assert f"#{n}" in text, f"PR #{n}"
     for key in ("全收益", "每10份", "单请求超时", "稳健性", "汇率"):

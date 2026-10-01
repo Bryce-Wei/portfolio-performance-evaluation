@@ -2,6 +2,7 @@
 
 模块按 docs/投资组合绩效评估.md 的章节组织：
 
+- ``fundeval.config``：第一部分第 1 节，评价口径配置 EvaluationConfig 与 TOML 读取 load_config
 - ``fundeval.etl``：第一部分，数据口径、读取（本地文件与 akshare）、清洗、单期收益计算、
   频率转换、复合基准与数据质量报告
 - ``fundeval.returns``：第二部分，TWR、年化、MWR/XIRR 与超额收益
@@ -21,5 +22,6 @@
 
 from fundeval._version import __version__
 from fundeval import alpha, attribution, costs, etl, monitor, report, returns, risk, tail
+from fundeval import config
 
-__all__ = ["__version__", "etl", "returns", "risk", "alpha", "attribution", "costs", "tail", "monitor", "report"]
+__all__ = ["__version__", "config", "etl", "returns", "risk", "alpha", "attribution", "costs", "tail", "monitor", "report"]

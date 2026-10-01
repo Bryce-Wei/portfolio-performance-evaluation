@@ -1,0 +1,67 @@
+# fundeval 评价口径配置（正文第一部分第 1 节“先确定可比较的评价口径”）
+#
+# 用法：
+#   fundeval report --fund 110020 --config examples/config.toml --out 110020.md
+#   fundeval compare --funds 110011,110020,000001 --config examples/config.toml --out compare.xlsx
+#   Python：from fundeval.config import load_config; evaluate(..., config=load_config("examples/config.toml"))
+#
+# 命令行显式给出的参数覆盖本文件（如再加 --freq Q），报告口径写明“配置来源：<文件>（命令行覆盖：…）”。
+# 未知的节或键会报错并列出可选键。删掉某一行（或整节）就用默认值；默认值与命令行一致，写在各行注释中。
+# 本示例按基金代码评价（--fund 或 compare）编写；评价本地收益表（--input）时，删去 [benchmark] 的 spec 与
+# [benchmark.map]（合同基准需要基金代码）以及 [style] 的 auto（按基金类型选择预设也需要基金代码）。
+
+[sample]
+start = "2021-01-01"          # 样本起始日（含）；缺省为数据最早日期
+end = "2025-12-31"            # 样本截止日（含）；缺省为最新
+freq = "M"                    # 评价频率：D / W / M / Q / A（默认 M）
+# periods_per_year = 244      # K：缺省按 freq（252 / 52 / 12 / 4 / 1）；只有日度可另给（如 A 股约 244 个交易日）
+
+[benchmark]
+spec = "contract"             # 基准：contract（合同业绩比较基准，--fund 的默认值）、"000300:0.8,H11001:0.2"、单个代码或合同文字
+# spec = { "000300" = 0.8, H11001 = 0.2 }   # 也可写成 {代码 = 权重} 的表
+index_return_type = "total"   # total（默认，换成全收益指数，000300 → H00300）或 price（价格指数，不含成分股分红）
+index_source = "auto"         # auto（默认，东方财富失败时改用中证指数官网）、em、csindex
+# deposit_rate = 0.0035       # 合同基准中活期存款利率（年化小数，默认 0.35%）
+# time_deposit_rate = 0.015   # 一年期定期存款利率（默认 1.50%）
+
+[benchmark.map]               # 合同基准中无法自动解析的成分：名称 = 代码（即 --benchmark-map），缺省为空
+"中债总指数" = "cbond:composite"   # 示例：110011 的“中债总指数”不自动映射，这里指定用中债综合财富指数替代（替代关系须自行判断）
+
+[risk_free]
+sources = ["shibor3m", "cgb2y"]   # 无风险收益来源，按顺序尝试（默认 "auto"，即 Shibor 3M → 国债 2 年）
+# rate = 0.018                    # 或常数年化利率（与 sources 二选一）
+
+[currency]
+fx = "convert"                # 非人民币基准成分：convert（默认，按人民币汇率中间价换算）或 none（不换算）
+
+[fees]
+basis = "费用后净值"           # 费用口径说明（默认“费用后净值”：Alpha 已是扣费后口径，不再重复扣减）
+
+[risk]
+# mar = 0.0015                # Sortino 的最低可接受收益（每期小数）；缺省取无风险收益，正文要求事前约定
+confidence = 0.95             # 历史 VaR / ES 的置信水平，须在 (0, 1) 内（默认 0.95）
+
+[regression]
+hac_lags = 3                  # Newey–West 标准误的滞后阶数（缺省为 OLS 标准误）
+use_t = true                  # HAC 的 p 值与置信区间也用 t 分布（默认 false，小样本建议 true）
+robustness = true             # 剔除数据质量报告标出的异常期后重估 CAPM、TM、HM（默认 true）
+
+[style]
+preset = "auto"               # Sharpe 风格分析：auto（按基金类型）、cn_equity、cn_balanced 或逗号分隔的代码；缺省不做
+# window = 36                 # 滚动风格权重的窗口期数（不小于风格资产数 + 2）
+
+[factors]
+preset = "cn_index_proxy"     # 多因子分解：cn_index_proxy、cn_index_proxy4（加 UMD）、ff3_us、carhart_us（美国市场，美元）；缺省不做
+
+# [monitor]                   # 持续监控（三项须同时给出；compare 不使用）
+# target_active = 0.03        # 年化目标主动收益
+# target_te = 0.04            # 年化目标 TE
+# window = 12                 # 窗口期数
+
+[data]
+# cache_dir = "~/.fundeval/cache"   # akshare 与 French 因子库的原始数据缓存目录（默认 ~/.fundeval/cache）
+use_cache = true              # 读写缓存（默认 true；false 等同 --no-cache）
+refresh = false               # 忽略已有缓存、重新请求（默认 false）
+timeout = 30                  # 单个 HTTP 请求的超时秒数（默认 30）
+total_timeout = 300           # 每次尝试的兜底总时限秒数（默认 300）
+tolerance = 0.0005            # 净值推算收益与日增长率交叉核对的容差（默认 5 个基点）

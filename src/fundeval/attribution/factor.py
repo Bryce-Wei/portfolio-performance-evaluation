@@ -16,9 +16,20 @@ A 股指数代理因子（``factor_preset("cn_index_proxy")``）用中证指数�
 - SMB = 中证1000全收益 H00852 − 沪深300全收益 H00300
 - HML = 沪深300价值全收益 H00919 − 沪深300成长全收益 H00918
 
+``cn_index_proxy4`` 在此基础上加动量因子：
+
+- UMD = 沪深300动量 H30260 − 沪深300 000300
+
+两条腿都用价格指数，保证分红口径一致（H30260 的全收益代码未知，不猜测），所以不受
+``--index-return-type total`` 的全收益替换影响。
+
 这是“指数代理因子”：由只做多的指数收益相减得到，与 Fama–French 按市值、账面市值比分组、
 多空组合的构造不同（成分、加权、再平衡与行业结构都不同），系数不能与学术因子的结果直接比较。
-没有经过核实的动量指数，默认不构造 UMD；调用方可以在 ``extra`` 中传入自定义因子列。
+调用方也可以在 ``extra`` 中传入自定义因子列。
+
+美国市场因子 ``ff3_us``（MKT、SMB、HML）与 ``carhart_us``（再加 UMD）取自 Kenneth R. French Data Library
+（etl.sources.french），无风险收益使用因子库中的 RF；这是美国市场因子、以美元计价，适合投资美股的
+QDII 等基金，人民币计价的基金收益含汇率影响，A 股基金应使用 cn_index_proxy 系列。
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import pandas as pd
 
 from fundeval._utils import broadcast_like
 from fundeval.alpha.regression import ALPHA, RegressionResult, excess_frame, factor_regression
+from fundeval.etl.sources.french import US_FACTOR_CAVEAT  # noqa: F401  （美国市场因子的限定语，报告沿用）
 
 #: 大样本双侧 5% 的 t 值参考阈值
 T_THRESHOLD = 1.96
@@ -47,14 +59,31 @@ PROXY_CAVEAT = (
     "系数不能与学术因子结果直接比较"
 )
 
-#: 因子预设：{因子名: (多头指数代码, 空头代码)}，空头为 ``rf`` 时减无风险收益。指数一律为全收益代码。
+#: 指数代理因子预设：{因子名: (多头指数代码, 空头代码)}，空头为 ``rf`` 时减无风险收益。
+#: 代码按原样取数，不做全收益替换：MKT、SMB、HML 为全收益代码；UMD 两条腿都是价格指数（分红口径一致）。
 FACTOR_PRESETS: dict[str, dict[str, tuple[str, str]]] = {
     "cn_index_proxy": {
         "MKT": ("H00300", RISK_FREE),
         "SMB": ("H00852", "H00300"),
         "HML": ("H00919", "H00918"),
     },
+    "cn_index_proxy4": {
+        "MKT": ("H00300", RISK_FREE),
+        "SMB": ("H00852", "H00300"),
+        "HML": ("H00919", "H00918"),
+        "UMD": ("H30260", "000300"),
+    },
 }
+
+#: 美国市场因子预设（French 因子库）：{因子名: 因子库列名}（列名为 etl.sources.french.carhart_factors 的输出列）。
+#: 无风险收益使用因子库的 RF。
+US_FACTOR_PRESETS: dict[str, dict[str, str]] = {
+    "ff3_us": {"MKT": "MKT", "SMB": "SMB", "HML": "HML"},
+    "carhart_us": {"MKT": "MKT", "SMB": "SMB", "HML": "HML", "UMD": "UMD"},
+}
+
+#: 全部因子预设名（CLI --factors 的可选值）
+FACTOR_PRESET_NAMES: tuple[str, ...] = (*FACTOR_PRESETS, *US_FACTOR_PRESETS)
 
 #: 预设的说明文字
 FACTOR_DESCRIPTIONS = {
@@ -62,6 +91,23 @@ FACTOR_DESCRIPTIONS = {
         "MKT": "沪深300全收益 H00300 − 无风险收益",
         "SMB": "中证1000全收益 H00852 − 沪深300全收益 H00300",
         "HML": "沪深300价值全收益 H00919 − 沪深300成长全收益 H00918",
+    },
+    "cn_index_proxy4": {
+        "MKT": "沪深300全收益 H00300 − 无风险收益",
+        "SMB": "中证1000全收益 H00852 − 沪深300全收益 H00300",
+        "HML": "沪深300价值全收益 H00919 − 沪深300成长全收益 H00918",
+        "UMD": "沪深300动量 H30260 − 沪深300 000300（均为价格指数，分红口径一致）",
+    },
+    "ff3_us": {
+        "MKT": "Mkt-RF（美国市场超额收益）",
+        "SMB": "SMB（小盘 − 大盘）",
+        "HML": "HML（高账面市值比 − 低账面市值比）",
+    },
+    "carhart_us": {
+        "MKT": "Mkt-RF（美国市场超额收益）",
+        "SMB": "SMB（小盘 − 大盘）",
+        "HML": "HML（高账面市值比 − 低账面市值比）",
+        "UMD": "Mom（动量：过去 12 个月赢家 − 输家）",
     },
 }
 
@@ -76,16 +122,28 @@ EXPOSURE_HINTS = {
 #: DataFrame.attrs 中标记因子类型的键；值为 "index_proxy" 时报告写明代理因子的限定语
 FACTOR_TYPE_ATTR = "factor_type"
 INDEX_PROXY = "index_proxy"
+#: 值为 "us_market" 时报告写明美国市场、美元计价的限定语
+US_MARKET = "us_market"
+
+#: 因子类型 → 限定语
+FACTOR_CAVEATS = {INDEX_PROXY: PROXY_CAVEAT, US_MARKET: US_FACTOR_CAVEAT}
+
+#: 因子类型的简短说明（指标备注使用）
+FACTOR_TYPE_SHORT = {INDEX_PROXY: "指数代理因子", US_MARKET: "美国市场因子（美元）"}
 
 
 def factor_preset(name: str) -> dict[str, tuple[str, str]]:
     """因子预设，返回 {因子名: (多头指数代码, 空头代码)} 的副本；空头为 ``rf`` 时减无风险收益。
 
     - ``cn_index_proxy``：MKT = H00300 − rf，SMB = H00852 − H00300，HML = H00919 − H00918
-      （中证指数官网全收益指数，2026-09-27 实测可取）。不含 UMD（没有经过核实的动量指数）。
+      （中证指数官网全收益指数，2026-09-27 实测可取）
+    - ``cn_index_proxy4``：再加 UMD = H30260 − 000300（沪深300动量与沪深300，均为价格指数）
+
+    美国市场因子 ``ff3_us`` / ``carhart_us`` 不由指数构造，见 US_FACTOR_PRESETS 与 us_market_factors。
     """
     if name not in FACTOR_PRESETS:
-        raise KeyError(f"未知的因子预设 {name!r}，可选：{sorted(FACTOR_PRESETS)}")
+        hint = "；美国市场因子用 us_market_factors" if name in US_FACTOR_PRESETS else ""
+        raise KeyError(f"未知的因子预设 {name!r}（指数代理因子），可选：{sorted(FACTOR_PRESETS)}{hint}")
     return dict(FACTOR_PRESETS[name])
 
 
@@ -143,6 +201,41 @@ def index_proxy_factors(
     return out
 
 
+#: French 因子库中无风险收益的列名
+US_RISK_FREE = "RF"
+
+
+def us_market_factors(library: pd.DataFrame, preset: str = "carhart_us") -> tuple[pd.DataFrame, pd.Series]:
+    """从 French 因子库的四因子表（etl.sources.french.carhart_factors 的输出，列 MKT、SMB、HML、UMD、RF）
+    取出预设的因子列，返回 (因子收益, 无风险收益 RF)。
+
+    - ``ff3_us``：MKT、SMB、HML
+    - ``carhart_us``：MKT、SMB、HML、UMD
+
+    回归的超额收益用因子库的 RF（美国 1 个月国库券，美元），不用报告的人民币无风险收益。
+    因子收益在 ``attrs["factor_type"]`` 中标为 ``"us_market"``，报告据此写明美国市场、美元计价的限定语
+    （US_FACTOR_CAVEAT）。任一期缺失时报错，不填零。
+    """
+    if preset not in US_FACTOR_PRESETS:
+        raise KeyError(f"未知的美国市场因子预设 {preset!r}，可选：{sorted(US_FACTOR_PRESETS)}")
+    spec = US_FACTOR_PRESETS[preset]
+    needed = [*spec.values(), US_RISK_FREE]
+    missing = [c for c in needed if c not in library.columns]
+    if missing:
+        raise ValueError(f"构造 {preset} 因子缺少列：{'、'.join(missing)}（实际列：{list(library.columns)}）")
+    frame = library[needed].astype(float)
+    gaps = frame.isna().any(axis=1)
+    if gaps.any():
+        raise ValueError(
+            f"因子库有 {int(gaps.sum())} 期缺失（首个 {frame.index[gaps.to_numpy()][0]}），请缩短区间，不能填零"
+        )
+    factors = pd.DataFrame({name: frame[col] for name, col in spec.items()}, index=frame.index)
+    factors.attrs[FACTOR_TYPE_ATTR] = US_MARKET
+    factors.attrs["preset"] = preset
+    rf = frame[US_RISK_FREE].rename(US_RISK_FREE)
+    return factors, rf
+
+
 @dataclass(frozen=True)
 class FactorDecomposition:
     """多因子分解结果。
@@ -192,6 +285,11 @@ class FactorDecomposition:
     @property
     def index_proxy(self) -> bool:
         return self.factor_type == INDEX_PROXY
+
+    @property
+    def caveat(self) -> str | None:
+        """因子类型的限定语：指数代理因子为 PROXY_CAVEAT，美国市场因子为 US_FACTOR_CAVEAT，其他为 None。"""
+        return FACTOR_CAVEATS.get(self.factor_type)
 
     def annualized_alpha(self, periods_per_year: int) -> float:
         """算术年化多因子 Alpha = α × K（不是几何年化）。"""
@@ -272,7 +370,8 @@ def factor_decomposition(
 
     ``factors`` 的 ``attrs["factor_type"]`` 为 ``"index_proxy"``（index_proxy_factors 的输出）时，结果标为
     指数代理因子，报告据此写明：因子由只做多的指数收益相减得到，与 Fama–French 的分组构造不同，
-    系数不能与学术因子结果直接比较（PROXY_CAVEAT）。
+    系数不能与学术因子结果直接比较（PROXY_CAVEAT）；为 ``"us_market"``（us_market_factors 的输出）时
+    写明美国市场、美元计价的限定语（US_FACTOR_CAVEAT）。
     """
     factor_type = getattr(factors, "attrs", {}).get(FACTOR_TYPE_ATTR) if isinstance(factors, pd.DataFrame) else None
     reg = factor_regression(returns, factors, risk_free, hac_lags=hac_lags, use_t=use_t)

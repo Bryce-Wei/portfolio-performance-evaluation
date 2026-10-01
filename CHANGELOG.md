@@ -3,6 +3,23 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。每一项注明对应的正文章节（docs/投资组合绩效评估.md）与引入它的 PR。
 0.1.0 是开发期间 pyproject 中的占位版本，没有发布过；0.2.0 是第一个发布版本，包含 PR #1–#10 与发布前收尾。
 
+## [未发布]
+
+### 新增
+
+- 评价口径配置（第一部分第 1 节）：`fundeval.config.EvaluationConfig`（不可变）集中定义区间、频率与 K、基准（contract、代码与权重或合同文字、`benchmark_map`、收益类型）、无风险收益（来源列表或常数）、汇率换算、费用口径、MAR、置信水平、HAC 与 t 分布、稳健性开关、风格、因子预设、监控目标、缓存与超时，默认值与命令行一致；`load_config` 读取 TOML（Python 3.11+ 用 tomllib，3.10 用 tomli 条件依赖），未知的节或键报错并列出可选键，数值逐项校验（K 为正、置信水平在 (0, 1) 内等）。`fundeval report` / `compare` 增加 `--config`：先读配置，再用命令行显式给出的参数覆盖，报告口径写明“配置来源：<文件>（命令行覆盖：…）”；`evaluate` 与 `compare` 增加 `config=` 参数，与关键字参数同时给出时关键字参数优先。示例 `examples/config.toml` 逐项注释。
+- Fama–French 因子库（第五部分第 3 节）：`etl.sources.french.french_factors(dataset, freq)` 下载并解析 Kenneth R. French Data Library 的 zip（只取月度或年度段，百分数换算为小数，月度索引为月末，−99.99 / −999 记为缺失、不填补），缓存 7 天，沿用 akshare 数据源的重试、单请求超时与缓存回退；`carhart_factors()` 合并三因子与动量因子为 MKT、SMB、HML、UMD、RF。下载用标准库，不依赖 akshare。
+- 四因子预设（第五部分第 3 节）：`cn_index_proxy4` 在 `cn_index_proxy` 上加 UMD = 沪深300动量 H30260 − 沪深300 000300（两者都用价格指数，保证分红口径一致；H30260 的全收益代码未知，不猜测；不做全收益替换）；`ff3_us`（MKT、SMB、HML）与 `carhart_us`（再加 UMD）来自 French 因子库，回归用因子库的 RF。`--factors` 增加这三个预设；美国市场因子在口径与结论中写明“美国市场、美元计价，适合投资美股的 QDII，人民币计价的基金收益含汇率影响，A 股基金应使用 cn_index_proxy 系列”。`evaluate` 增加 `factor_risk_free`。
+- 持仓与成交（第一部分第 2 节）：`schema` 增加持仓表（date、asset、sector、weight，可选 market_value）与成交表（date、asset、side、amount、price、fee）的标准列名与 `validate_holdings`、`validate_trades`（持仓权重每期加总为 1，容差可调，现金单列为一个行业）；`schema.sector_weights` 把持仓汇总为每期行业权重，可直接作为 `brinson_multi_period` 的输入；`schema.turnover_from_trades` 按买卖成交金额调用 `costs.turnover`。
+- 现金流识别（第一、二部分）：`clean.infer_cashflows(units, nav)` 按 ΔUnits × NAV_t 推算净申赎（流入为正）；`clean.flag_large_cashflows(flows, assets, threshold=0.05)` 标出超过资产规模一定比例的期中大额现金流，提示按发生时点拆分子期。
+- 样本长度检查（第一、四部分）：数据质量报告在样本少于 3 年（月度 36 期，或季度 12 期、周度 156 期、日度 756 期）时写明“样本较短，统计推断与能力判断受限”；频率缺省按日期间隔推断。
+- 示例 notebook `examples/walkthrough.ipynb`（第一至十部分）：不联网，用第九部分演示收益还原净值，按正文顺序演示读取与清洗 → 数据质量 → 单期收益 → 收益与风险指标 → 尾部风险 → Alpha 回归 → Brinson 单期例题 → 持续监控 → `evaluate` 报告与三段结论；联网单元集中在最后，由 `RUN_ONLINE = False` 控制。`tests/test_notebook.py` 不依赖 Jupyter，在临时目录中按顺序执行代码单元，CI 单列一步运行。
+
+### 口径与限定
+
+- 结论中的“数据质量有 N 项需复核”不计入样本长度提示（样本较短另有一句说明），`compare` 的“数据质量问题数”同理。
+- 联网测试新增 French 因子库 202512 与 202608 的数值核对、H30260 与 000300 的 2021–2025 年度收益核对（容差 0.05 个百分点）；连接类与超时类异常时跳过。
+
 ## [0.2.0] - 未发布
 
 ### 新增

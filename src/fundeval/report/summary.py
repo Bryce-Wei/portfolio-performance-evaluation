@@ -24,7 +24,7 @@ from fundeval import monitor, risk, tail
 from fundeval import returns as ret
 from fundeval.alpha.regression import RegressionResult, capm_regression
 from fundeval.alpha.robustness import ExclusionSensitivity, exclusion_sensitivity
-from fundeval.attribution.factor import FACTOR_TYPE_ATTR, PROXY_CAVEAT, FactorDecomposition, factor_decomposition
+from fundeval.attribution.factor import FACTOR_TYPE_ATTR, FACTOR_TYPE_SHORT, FactorDecomposition, factor_decomposition
 from fundeval.attribution.style import RollingStyleResult, StyleResult, rolling_style, style_analysis
 from fundeval.attribution.timing import TimingResult, henriksson_merton, treynor_mazuy
 from fundeval.etl import clean, schema
@@ -423,29 +423,45 @@ def _fmt_date(value) -> str:
     return value if isinstance(value, str) else f"{pd.Timestamp(value):%Y-%m-%d}"
 
 
+class _Unset:
+    """evaluate 参数的“未给出”标记：与 config 同时使用时区分调用方是否显式给出（显式给出者优先）。"""
+
+    def __init__(self, default):
+        self.default = default
+
+    def __repr__(self) -> str:
+        return repr(self.default)
+
+
+def _given(value) -> bool:
+    return not isinstance(value, _Unset)
+
+
 def evaluate(
     returns,
     benchmark=None,
     risk_free=0.0,
-    periods_per_year: int = 12,
+    periods_per_year: int = _Unset(12),
     *,
     market=None,
-    mar=None,
-    hac_lags: int | None = None,
-    monitor_targets: Mapping[str, float] | None = None,
+    mar=_Unset(None),
+    hac_lags: int | None = _Unset(None),
+    monitor_targets: Mapping[str, float] | None = _Unset(None),
     labels: Mapping[str, str] | None = None,
     cross_check: pd.DataFrame | None = None,
-    confidence: float = 0.95,
-    use_t: bool | None = None,
+    confidence: float = _Unset(0.95),
+    use_t: bool | None = _Unset(None),
     notes: list[str] | tuple[str, ...] | None = None,
     style_returns: pd.DataFrame | None = None,
     style_window: int | None = None,
     style_objective: str = "variance",
-    robustness: bool = True,
+    robustness: bool = _Unset(True),
     factor_returns: pd.DataFrame | None = None,
+    factor_risk_free=None,
     costs: Mapping[str, Any] | None = None,
     profile: Any = None,
     benchmark_components: pd.DataFrame | None = None,
+    config=None,
 ) -> EvaluationReport:
     """生成评价报告（正文第九、十部分）。
 
@@ -479,7 +495,10 @@ def evaluate(
     factor_returns : 因子收益（DataFrame，每列一个因子，同频小数）；给出时在“Alpha 质量”一节增加多因子
         Alpha（每期、算术年化、t、p）与各因子暴露、贡献表（attribution.factor），沿用 hac_lags 与 use_t；
         须覆盖全部共同期，否则报错。``attrs["factor_type"] == "index_proxy"``（index_proxy_factors 的输出）
-        或 labels["factor_type"] == "index_proxy" 时，口径与结论写明指数代理因子的限定语
+        或 labels["factor_type"] == "index_proxy" 时，口径与结论写明指数代理因子的限定语；为 "us_market"
+        （attribution.factor.us_market_factors 的输出，French 因子库）时写明美国市场、美元计价的限定语
+    factor_risk_free : 多因子回归使用的无风险收益（常数或序列）；缺省时与 risk_free 相同。French 因子库的
+        预设（ff3_us、carhart_us）用因子库的 RF，口径写明“因子回归无风险收益”（labels["factor_risk_free"]）
     costs : 成本输入（年化，小数）：turnover（换手率）、unit_cost（单位成交额成本，20 bp = 0.0020）、
         other_fees（其他费用）、可选 trade_cost（直接给出交易成本率，替代 2 × TO × c）、gross_alpha
         （费用前 Alpha；缺省时取报告的多因子或 CAPM 算术年化 Alpha）与 capacity（{"trade_amount",
@@ -491,12 +510,49 @@ def evaluate(
         QDII 基金在结论与附注中提示汇率与境外市场的影响
     benchmark_components : 合同基准的解析结果表（etl.benchmark.resolution_table），口径中列出，
         Markdown 与 Excel 另附“基准解析”表
+    config : fundeval.config.EvaluationConfig（评价口径，正文第一部分第 1 节）；给出时，未显式给出的
+        periods_per_year（config.k）、mar、hac_lags、use_t、confidence、robustness 与 monitor_targets 取自
+        config，labels 未写 fees 时取 config.fees；config 给出 start / end 时先把组合、基准、市场、无风险收益
+        截取到该区间（不做频率转换，收益须已是 config.freq 的频率）。关键字参数与 config 同时给出时，
+        关键字参数优先。口径写明“配置来源”（labels["config_source"]，缺省为 config.source）
 
     组合、基准、市场按日期取交集；交集内仍有缺失时报错，不填零。口径中写明
     “组合 N 期、基准 M 期、共同 K 期”，有期数被丢弃时在附注中列出其起止日期；
     数据质量报告按日期并集统计缺失。
     """
     labels = dict(labels or {})
+    if config is not None:
+        cfg_values = {
+            "periods_per_year": config.k, "mar": config.mar, "hac_lags": config.hac_lags,
+            "use_t": True if config.use_t else None, "confidence": config.confidence,
+            "robustness": config.robustness, "monitor_targets": config.monitor_targets,
+        }
+    else:
+        cfg_values = {}
+
+    def pick(name, value):
+        if _given(value):
+            return value
+        return cfg_values[name] if name in cfg_values else value.default
+
+    periods_per_year = pick("periods_per_year", periods_per_year)
+    mar = pick("mar", mar)
+    hac_lags = pick("hac_lags", hac_lags)
+    use_t = pick("use_t", use_t)
+    confidence = pick("confidence", confidence)
+    robustness = pick("robustness", robustness)
+    monitor_targets = pick("monitor_targets", monitor_targets)
+    if config is not None:
+        labels.setdefault("fees", config.fees)
+        labels.setdefault("config_source", config.describe())
+        if config.start or config.end:
+            sample = slice(pd.Timestamp(config.start) if config.start else None,
+                           pd.Timestamp(config.end) if config.end else None)
+
+            def cut(obj):
+                return obj.loc[sample] if isinstance(obj, (pd.Series, pd.DataFrame)) else obj
+
+            returns, benchmark, market, risk_free = cut(returns), cut(benchmark), cut(market), cut(risk_free)
     k = int(periods_per_year)
     p_raw, benchmark, risk_free, market = _as_frame(returns, benchmark, risk_free, market)
 
@@ -506,7 +562,7 @@ def evaluate(
     if market is not None:
         raw_parts[schema.MARKET] = market
     outer = clean.align(*raw_parts.values(), how="outer", names=list(raw_parts))
-    quality = data_quality_report(outer, cross_check=cross_check)
+    quality = data_quality_report(outer, cross_check=cross_check, periods_per_year=k)
 
     common = pd.DatetimeIndex(p_raw.index)
     for part in raw_parts.values():
@@ -640,13 +696,25 @@ def evaluate(
                 f"（首个 {p.index[gaps.to_numpy()][0]:%Y-%m-%d}），请缩短区间或更换因子"
             )
         fr.attrs[FACTOR_TYPE_ATTR] = factor_type
+        factor_rf = rf
+        if factor_risk_free is not None:
+            if np.isscalar(factor_risk_free):
+                factor_rf = pd.Series(float(factor_risk_free), index=p.index)
+            else:
+                factor_rf = pd.Series(factor_risk_free, dtype=float).reindex(p.index)
+                if factor_rf.isna().any():
+                    first = p.index[factor_rf.isna().to_numpy()][0]
+                    raise ValueError(
+                        f"因子回归的无风险收益未覆盖全部 {len(p)} 个共同期：缺 {int(factor_rf.isna().sum())} 期"
+                        f"（首个 {first:%Y-%m-%d}），请缩短区间"
+                    )
         try:
-            factor = factor_decomposition(p, fr, rf, hac_lags=hac_lags, use_t=use_t)
+            factor = factor_decomposition(p, fr, factor_rf, hac_lags=hac_lags, use_t=use_t)
         except ValueError as exc:
             factor_error = str(exc)
     if factor is not None:
         se = _se_label(factor.regression)
-        proxy = "；指数代理因子" if factor.index_proxy else ""
+        proxy = f"；{FACTOR_TYPE_SHORT[factor.factor_type]}" if factor.factor_type in FACTOR_TYPE_SHORT else ""
         names = "、".join(factor.contributions.index)
         add(s, "factor_alpha", "多因子 Alpha（每期）", factor.alpha, PCT, f"截距，因子 {names}{proxy}")
         add(s, "factor_alpha_annualized", "多因子 Alpha（算术年化）", factor.annualized_alpha(k), PCT, "α × K，算术口径")
@@ -804,16 +872,20 @@ def evaluate(
     scope["无风险收益"] = _rf_description(risk_free, labels)
     if factor is not None:
         scope["因子"] = labels.get("factors", "、".join(map(str, factor.contributions.index)))
-        if factor.index_proxy:
-            scope["因子类型"] = PROXY_CAVEAT
+        if factor.caveat:
+            scope["因子类型"] = factor.caveat
         if "factor_source" in labels:
             scope["因子数据源"] = labels["factor_source"]
+        if factor_risk_free is not None:
+            scope["因子回归无风险收益"] = labels.get("factor_risk_free", "调用方给出的因子无风险收益")
     scope["费用口径"] = fee_label
     if profile is not None:
         scope["费率"] = _fee_text(profile, fee_label)
     if profile is not None and profile.is_qdii:
         notes.append(QDII_NOTE + "。")
     scope["比率口径"] = "同频算术均值与样本标准差（n−1），乘以 √K 年化；累计与年化收益为几何口径"
+    if "config_source" in labels:
+        scope["配置来源"] = labels["config_source"]
     if market_proxy:
         notes.append("未提供市场收益，Treynor、CAPM 与择时回归以基准代替市场。")
 
@@ -824,7 +896,7 @@ def evaluate(
     if factor is None:
         reason = (
             f"回归失败：{factor_error}" if factor_error is not None
-            else "未提供因子收益（CLI 用 --factors cn_index_proxy，Python 用 factor_returns）"
+            else "未提供因子收益（CLI 用 --factors cn_index_proxy / cn_index_proxy4 / ff3_us / carhart_us，Python 用 factor_returns）"
         )
         not_done.append(("多因子分解（第五部分第 3 节）", "未做", reason))
     not_done += [
@@ -1025,8 +1097,8 @@ def conclusion(report: EvaluationReport) -> str:
             f"（算术年化 {_pct(f.annualized_alpha(k))}），t = {f.alpha_t:.2f}，p = {f.alpha_p:.3f}，"
             f"R² = {f.rsquared:.2f}，n = {f.n}，{_significance(f.alpha_t)}；{f.exposure_text()}。"
         )
-        if f.index_proxy:
-            text += f"{PROXY_CAVEAT}。"
+        if f.caveat:
+            text += f"{f.caveat}。"
         sup.append(text)
     if r.style is not None:
         top = r.style.top(2)
@@ -1085,7 +1157,7 @@ def conclusion(report: EvaluationReport) -> str:
             f"持续监控：风险倍数 {format_value(r.monitoring['risk_multiple'], RATIO)}，z 值 {format_value(r.monitoring['z'], RATIO)}，"
             f"当前分区 {status}（阈值为演示值，须按策略校准）。"
         )
-    issues = r.quality.issues()
+    issues = r.quality.data_issues()  # 样本长度另由下面的“样本较短”一句说明
     if issues:
         ver.append(f"数据质量有 {len(issues)} 项需复核（见数据质量报告），结论须在复核后确认。")
     else:
