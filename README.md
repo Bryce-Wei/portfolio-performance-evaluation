@@ -334,23 +334,68 @@ report = evaluate(
 
 ## 仓库结构
 
+源码按正文章节组织：`etl/` 对应第一部分的数据准备，顶层模块与子包按正文第二至第八部分划分，`report/` 对应第九、十部分。注释中的中文数字即正文章节。
+
 ```text
-.
-├── README.md                     # 快速开始、功能对照、口径与详细用法
+portfolio-performance-evaluation/
+├── README.md                     # 快速开始、功能与正文对照、口径与详细用法
 ├── CHANGELOG.md                  # 更新日志
-├── pyproject.toml                # fundeval 包配置与依赖（版本号读自 src/fundeval/_version.py）
-├── .github/workflows/tests.yml   # CI：多版本 Python 运行 pytest 与 quickstart
+├── pyproject.toml                # 包配置与依赖；可选依赖 data / excel / plot / test
+├── .github/workflows/tests.yml   # CI：Python 3.10–3.12 运行 pytest 与 quickstart
 ├── docs/
-│   ├── 投资组合绩效评估.md        # 完整正文
-│   ├── 投资组合绩效评估.docx      # Word 修订稿 v1
-│   ├── assets/
-│   │   └── style-weights.png      # 文章案例图
+│   ├── 投资组合绩效评估.md       # 正文：全部方法与口径的依据
+│   ├── 投资组合绩效评估.docx     # Word 修订稿 v1
+│   ├── assets/                   # 正文案例图
 │   └── examples/                 # quickstart 生成的示例报告与图表
-├── examples/
-│   ├── quickstart.py             # 离线示例：第九部分演示数据的完整报告
-│   └── fund_code.md              # 联网示例：真实基金代码的命令与数据源替代办法
-├── src/fundeval/                 # 工具包源码
-└── tests/                        # 单元测试与第九部分基准测试
+│
+├── src/fundeval/
+│   ├── cli.py                    # 命令行：fundeval report 一键评价，fundeval compare 横向对比
+│   ├── __main__.py               # python -m fundeval，与命令行相同
+│   ├── _version.py               # 版本号的唯一来源
+│   ├── _utils.py                 # 内部工具：输入统一为 Series、对齐、安全除法
+│   ├── _console.py               # 命令行输出的编码兜底
+│   │
+│   ├── etl/                      # ★ 数据前期准备（对应正文一）
+│   │   ├── schema.py             #   标准数据结构与校验：收益表、净值、现金流；频率 → K
+│   │   ├── sources/              #   数据读取
+│   │   │   ├── files.py          #     CSV / Excel 导入
+│   │   │   └── akshare.py        #     基金净值与分红、基金概况、指数、无风险利率、汇率（可选）
+│   │   ├── benchmark.py          #   基准（一.1）：合同基准解析、全收益指数映射、复合基准、风格预设
+│   │   ├── fx.py                 #   外币指数收益换算为人民币（汇率中间价）
+│   │   ├── clean.py              #   清洗：日期对齐 → 币种统一 → 缺失与异常复核 → 停牌标记
+│   │   ├── returns.py            #   净值 / 价格加分红 / 资产值 → 单期收益；日度 → 周、月、季
+│   │   └── quality.py            #   数据质量报告：缺失、异常、停牌或估值滞后、净值与日增长率核对
+│   │
+│   ├── returns.py                # 二：TWR、MWR/XIRR、年化、累计差额与几何相对收益
+│   ├── risk.py                   # 三：波动率、最大回撤、Sharpe、TE、IR、Treynor、Jensen Alpha、M²
+│   ├── tail.py                   # 八：下行偏差、Sortino、Calmar、历史 VaR / ES
+│   ├── alpha/                    # 四：Alpha 证据
+│   │   ├── regression.py         #   CAPM / 多因子回归，Newey-West 稳健 t 值
+│   │   ├── rolling.py            #   滚动 Alpha、Beta、IR，样本外切分
+│   │   ├── robustness.py         #   稳健性：剔除异常期后重估 CAPM、TM、HM
+│   │   └── fundamental.py        #   IC、有效广度、主动管理基本定律
+│   ├── attribution/              # 五：收益来源
+│   │   ├── style.py              #   Sharpe 风格分析（非负、和为 1 的约束回归），含滚动
+│   │   ├── brinson.py            #   BHB / BF 单期归因 + Cariño 多期链接
+│   │   ├── factor.py             #   多因子分解：A 股指数代理因子 MKT / SMB / HML，可加自定义因子
+│   │   ├── campisi.py            #   固收：收入 / 利率 / 利差 / 剩余，含关键期限久期
+│   │   └── timing.py             #   TM、HM 择时模型
+│   ├── costs.py                  # 六：换手率、交易成本、净 Alpha、容量敏感性
+│   ├── monitor.py                # 七：滚动 TE、风险倍数、z 值、Green / Yellow / Red 分区
+│   └── report/                   # 九、十：汇总与结论
+│       ├── inputs.py             #   取数与组装：基金代码或本地文件 → 收益、基准、无风险、风格、因子
+│       ├── summary.py            #   一键评价：六个维度的指标、回归、稳健性与三段式结论
+│       ├── compare.py            #   多基金横向对比（不做综合打分）
+│       ├── charts.py             #   图表：财富指数、回撤、滚动超额与 TE、风格权重（可选）
+│       └── export.py             #   导出 Excel / Markdown 报告
+│
+├── tests/                        # 用正文第九部分的演示数据做基准测试
+│   │                             # 例如累计收益必须等于 10.2058%、IR 等于 2.2327
+│   ├── data/                     #   演示数据，以及按 akshare 真实返回格式录制的样本
+│   └── fake_akshare.py           #   离线模拟 akshare，测试全程不联网
+└── examples/                     # 示例：从原始净值到评价结论
+    ├── quickstart.py             #   离线：第九部分演示数据 → 完整报告
+    └── fund_code.md              #   联网：真实基金代码的命令与数据源替代办法
 ```
 
 
