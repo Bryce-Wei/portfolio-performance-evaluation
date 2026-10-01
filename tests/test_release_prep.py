@@ -422,7 +422,9 @@ def test_changelog_structure():
 def test_readme_structure():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     headings = [line for line in text.splitlines() if line.startswith("## ")]
-    assert headings[0].startswith("## 快速开始")
+    # README 开头是开发进度表，其后紧接快速开始
+    assert headings[0].startswith("## 开发进度")
+    assert headings[1].startswith("## 快速开始")
     assert 'pip install -e ".[data,excel,plot]"' in text
     assert "examples/quickstart.py" in text
     quick = text.split("## 快速开始")[1].split("\n## ")[0]
