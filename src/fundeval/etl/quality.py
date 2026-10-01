@@ -1,7 +1,10 @@
 """数据质量报告：正文第一部分“数据准备”的复核清单。
 
-汇总样本起止与期数、缺失、异常收益、疑似停牌或估值滞后，以及净值推算收益与数据源
+汇总样本起止与期数、样本长度、缺失、异常收益、疑似停牌或估值滞后，以及净值推算收益与数据源
 “日增长率”的交叉核对差异。本模块只标记与报告，不修改或填补数据。
+
+样本长度：少于 MIN_SAMPLE_YEARS（3 年，月度 36 期、季度 12 期、周度 156 期、日度 756 期）时，
+问题清单写明“样本较短，统计推断与能力判断受限”（正文第四部分：短样本的 Alpha 显著性与能力判断不可靠）。
 """
 
 from __future__ import annotations
@@ -15,6 +18,39 @@ from fundeval.etl import clean, schema
 #: 净值推算收益与数据源日增长率的默认容差：5 个基点。
 #: 日增长率通常以百分数保留两位小数，四位小数的净值在 0.5 元附近也有约 2 个基点的舍入误差。
 CROSS_CHECK_TOLERANCE = 0.0005
+
+#: 样本长度检查的最短年数：少于 MIN_SAMPLE_YEARS × K 期时提示样本较短
+MIN_SAMPLE_YEARS = 3
+
+#: 频率名称（问题清单使用）
+_FREQ_NAMES = {252: "日度", 52: "周度", 12: "月度", 4: "季度", 1: "年度"}
+
+#: 按相邻日期间隔的中位数（自然日）推断 K：不超过上界即取该 K
+_SPACING_TO_K = ((5, 252), (10, 52), (45, 12), (135, 4))
+
+
+def infer_periods_per_year(index: pd.DatetimeIndex) -> int | None:
+    """按相邻日期间隔的中位数推断一年期数 K（日度 252、周度 52、月度 12、季度 4、年度 1）；少于两个日期时返回 None。"""
+    idx = pd.DatetimeIndex(index).sort_values()
+    if len(idx) < 2:
+        return None
+    spacing = float(pd.Series(idx).diff().dt.days.dropna().median())
+    for upper, k in _SPACING_TO_K:
+        if spacing <= upper:
+            return k
+    return 1
+
+
+def sample_length_issue(periods: int, periods_per_year: int | None, min_years: float = MIN_SAMPLE_YEARS) -> str | None:
+    """样本长度检查：期数少于 min_years × K 时返回问题描述，否则返回 None（K 未知时不检查）。"""
+    if periods_per_year is None:
+        return None
+    k = int(periods_per_year)
+    need = int(round(min_years * k))
+    if periods >= need:
+        return None
+    freq = _FREQ_NAMES.get(k, f"K = {k} ")
+    return f"样本较短（{periods} 期，{freq}少于 {need} 期，即不足 {min_years:g} 年），统计推断与能力判断受限"
 
 
 def nav_growth_check(
@@ -49,6 +85,8 @@ class QualityReport:
     - ``outliers``：稳健 z 值标记的异常收益（列 ``date``、``column``、``value``）
     - ``stale``：疑似停牌或估值滞后的区间（列 ``column``、``start``、``end``、``length``）
     - ``cross_check``：净值推算收益与日增长率差异超过容差的日期；未提供核对数据时为 None
+    - ``periods_per_year`` / ``min_years``：样本长度检查使用的 K 与最短年数；``min_periods`` = min_years × K
+      （K 未知时为 None，不检查），``short_sample`` 为期数少于 min_periods
     """
 
     start: pd.Timestamp | None
@@ -60,10 +98,20 @@ class QualityReport:
     cross_check: pd.DataFrame | None = None
     cross_check_tolerance: float | None = None
     notes: list[str] = field(default_factory=list)
+    periods_per_year: int | None = None
+    min_years: float = MIN_SAMPLE_YEARS
+
+    @property
+    def min_periods(self) -> int | None:
+        return None if self.periods_per_year is None else int(round(self.min_years * self.periods_per_year))
+
+    @property
+    def short_sample(self) -> bool:
+        return self.min_periods is not None and self.periods < self.min_periods
 
     @property
     def issue_count(self) -> int:
-        n = int(self.missing["missing"].sum()) + len(self.outliers) + len(self.stale)
+        n = int(self.missing["missing"].sum()) + len(self.outliers) + len(self.stale) + int(self.short_sample)
         if self.cross_check is not None:
             n += len(self.cross_check)
         return n
@@ -71,6 +119,8 @@ class QualityReport:
     def issues(self) -> list[str]:
         """逐条列出需要复核的问题（中文），没有问题时返回空列表。"""
         out: list[str] = []
+        if self.short_sample:
+            out.append(sample_length_issue(self.periods, self.periods_per_year, self.min_years))
         for col, row in self.missing.iterrows():
             if row["missing"]:
                 out.append(f"{col} 缺失 {int(row['missing'])} 期（首个缺失 {row['first_missing']:%Y-%m-%d}），未填补")
@@ -97,6 +147,9 @@ class QualityReport:
             ("样本止", f"{self.end:%Y-%m-%d}" if self.end is not None else "—"),
             ("期数", str(self.periods)),
         ]
+        if self.min_periods is not None:
+            verdict = "样本较短，统计推断与能力判断受限" if self.short_sample else "满足"
+            rows.append((f"样本长度（不少于 {self.min_periods} 期）", verdict))
         for col, row in self.missing.iterrows():
             rows.append((f"缺失期数（{col}）", str(int(row["missing"]))))
         rows.append(("异常收益（稳健 z 值）", str(len(self.outliers))))
@@ -131,6 +184,8 @@ def data_quality_report(
     cross_check: pd.DataFrame | None = None,
     outlier_threshold: float = 5.0,
     stale_min_run: int = 3,
+    periods_per_year: int | None = None,
+    min_years: float = MIN_SAMPLE_YEARS,
 ) -> QualityReport:
     """汇总收益数据的质量问题，返回 QualityReport。
 
@@ -139,6 +194,8 @@ def data_quality_report(
     - 疑似停牌或估值滞后：给出 ``nav`` 时对净值用 clean.flag_stale（连续 stale_min_run 个
       净值不变）；否则对收益找连续 stale_min_run 期及以上的零收益
     - 交叉核对：``cross_check`` 为 nav_growth_check 的结果，只保留 flagged 的日期
+    - 样本长度：期数少于 ``min_years`` × K（默认 3 年，月度 36 期）时，问题清单写明“样本较短，统计推断与
+      能力判断受限”；``periods_per_year`` 缺省时按日期间隔推断（infer_periods_per_year）
 
     无风险收益列（``risk_free``）通常为常数或缓慢变化，不做异常与停牌检查。
     """
@@ -174,7 +231,14 @@ def data_quality_report(
         flagged = cross_check[cross_check["flagged"]].drop(columns="flagged")
         tol = cross_check.attrs.get("tolerance")
 
+    k = int(periods_per_year) if periods_per_year is not None else infer_periods_per_year(df.index)
+    if k is not None and k <= 0:
+        raise ValueError(f"periods_per_year 须为正整数，收到 {periods_per_year}")
+    if min_years <= 0:
+        raise ValueError(f"min_years 须为正数，收到 {min_years}")
     return QualityReport(
+        periods_per_year=k,
+        min_years=min_years,
         start=df.index[0] if len(df) else None,
         end=df.index[-1] if len(df) else None,
         periods=len(df),

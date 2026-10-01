@@ -510,7 +510,7 @@ def evaluate(
     if market is not None:
         raw_parts[schema.MARKET] = market
     outer = clean.align(*raw_parts.values(), how="outer", names=list(raw_parts))
-    quality = data_quality_report(outer, cross_check=cross_check)
+    quality = data_quality_report(outer, cross_check=cross_check, periods_per_year=k)
 
     common = pd.DatetimeIndex(p_raw.index)
     for part in raw_parts.values():
