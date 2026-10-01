@@ -9,6 +9,9 @@
 matplotlib 是可选依赖（``pip install "fundeval[plot]"``），按需导入；未安装时 require_matplotlib 报错并提示安装，
 不影响其他功能。一律使用 Agg 后端，不弹窗。
 
+图例一律放在坐标区之外，不压在曲线上：系列不超过 LEGEND_RIGHT_MAX 个时放在右侧（一列），更多时放在
+坐标区下方（多列）；保存时按包含图例的外接框裁切（bbox_inches="tight"）。
+
 中文字体按 CJK_FONTS 的顺序查找（Microsoft YaHei、SimHei、PingFang SC、Noto Sans CJK SC、WenQuanYi 等）；
 都没有时改用英文标签并发出 RuntimeWarning，避免中文显示为方框。英文模式下风格资产与基金用代码标注。
 """
@@ -48,6 +51,12 @@ ROLLING_WINDOW = 12
 
 #: 回撤未修复时，0 线上方留出的空白带（最大回撤的倍数），用于放“未修复”标注
 UNRECOVERED_HEADROOM = 0.15
+
+#: 图例放在坐标区右侧的最大系列数；更多时放在下方
+LEGEND_RIGHT_MAX = 4
+
+#: 图例放在下方时的最大列数
+LEGEND_BOTTOM_COLUMNS = 4
 
 #: 系列颜色：按固定顺序分配，不循环（超过时合并或截断并提示）
 SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
@@ -172,9 +181,10 @@ def _figure(nrows: int = 1, height: float = 3.6):
 
 
 def _percent_axis(ax) -> None:
+    """纵轴按百分数显示；小数位随刻度范围自动选择，避免范围较窄时相邻刻度显示成同一个整数百分比。"""
     from matplotlib.ticker import PercentFormatter
 
-    ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+    ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=None))
 
 
 def _with_start(wealth: pd.Series) -> pd.Series:
@@ -187,10 +197,19 @@ def _with_start(wealth: pd.Series) -> pd.Series:
     return pd.concat([start, wealth])
 
 
-def _legend(ax) -> None:
-    leg = ax.legend(frameon=False, fontsize=8, loc="upper left")
+def _legend(ax):
+    """把图例放在坐标区之外：系列数不超过 LEGEND_RIGHT_MAX 时放在右侧，更多时放在下方（多列）。"""
+    handles, labels = ax.get_legend_handles_labels()
+    n = len(labels)
+    if n <= LEGEND_RIGHT_MAX:
+        leg = ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0)
+    else:
+        # 下方留出刻度标签的空间；列数不超过 LEGEND_BOTTOM_COLUMNS
+        leg = ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12),
+                        ncol=min(n, LEGEND_BOTTOM_COLUMNS), borderaxespad=0)
     for text in leg.get_texts():
         text.set_color(INK)
+    return leg
 
 
 def _title(ax, text: str) -> None:
@@ -304,9 +323,7 @@ def style_figure(weights: pd.DataFrame, window: int, lang: str = "zh", codes: Ma
     ax.set_ylim(0, 1)
     ax.margins(x=0)
     _percent_axis(ax)
-    leg = ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.0, 1.0))
-    for text in leg.get_texts():
-        text.set_color(INK)
+    _legend(ax)
     _title(ax, t["style_title"].format(w=window))
     fig.tight_layout()
     return fig
@@ -332,7 +349,8 @@ def _save(fig, path: Path) -> Path:
     import matplotlib.pyplot as plt
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor())
+    # 图例在坐标区之外：按包含图例的外接框保存，避免被裁掉
+    fig.savefig(path, dpi=DPI, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.15)
     plt.close(fig)
     return path
 
@@ -347,7 +365,7 @@ def _font_context(font: str | None):
 
 
 def report_charts(report, out_dir, *, window: int = ROLLING_WINDOW) -> ChartSet:
-    """为 EvaluationReport 生成 PNG 图表到 ``out_dir``：wealth、drawdown，有基准且期数不少于 window 时 rolling，
+    """为 EvaluationReport 生成 PNG 图表到 ``out_dir``：wealth、drawdown，有基准且期数多于 window（至少 2 个窗口）时 rolling，
     有滚动风格分析（style_window）时 style。未生成的图表及原因记入 ``skipped``（写入 Markdown 与 Excel 的图注），
     例如只做全样本风格分析时注明需要 --style-window。"""
     require_matplotlib()
@@ -363,6 +381,9 @@ def report_charts(report, out_dir, *, window: int = ROLLING_WINDOW) -> ChartSet:
             skipped["rolling"] = "未提供基准"
         elif len(data) < window:
             skipped["rolling"] = f"样本 {len(data)} 期，少于滚动窗口 {window} 期"
+        elif len(data) == window:
+            # 只有 1 个窗口时滚动曲线只有一个点，画出来是空图
+            skipped["rolling"] = f"样本 {len(data)} 期，等于滚动窗口 {window} 期，只有 1 个窗口，画不出滚动曲线（至少需要 {window + 1} 期）"
         else:
             paths["rolling"] = _save(rolling_figure(data, report.periods_per_year, lang, window), out / "rolling.png")
         if report.style_rolling is not None:
@@ -407,7 +428,7 @@ def comparison_charts(comparison, out_dir) -> ChartSet:
 
 
 __all__ = [
-    "CJK_FONTS", "CHART_TITLES", "ChartSet", "ROLLING_WINDOW", "chart_language", "comparison_charts",
+    "CJK_FONTS", "CHART_TITLES", "ChartSet", "LEGEND_RIGHT_MAX", "ROLLING_WINDOW", "chart_language", "comparison_charts",
     "compare_figure", "drawdown_figure", "find_cjk_font", "report_charts", "require_matplotlib", "rolling_active",
     "rolling_figure", "style_figure", "wealth_figure",
 ]

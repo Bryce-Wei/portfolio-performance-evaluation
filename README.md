@@ -2,14 +2,68 @@
 
 围绕收益、风险和可实现的 Alpha，整理投资组合绩效评估方法、风格分析、收益归因、择时检验与持续监控流程。
 
-当前收录文章与计算示例，并在 `src/fundeval/` 中逐步加入对应的 Python 实现。
+仓库包含正文（[docs/投资组合绩效评估.md](docs/投资组合绩效评估.md)）与按正文章节组织的 Python 工具包 `fundeval`（`src/fundeval/`）：输入基金代码或本地收益表，生成含口径、各维度指标、回归、归因、数据质量与三段结论的评价报告（Markdown / Excel，可附图表），也可多基金横向对比。当前版本 0.2.0，变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 阅读与下载
+## 快速开始
+
+**安装**（Python ≥ 3.10）：
+
+```bash
+pip install -e ".[data,excel,plot]"   # data：akshare 数据源；excel：Excel 报告；plot：图表
+```
+
+**离线示例**：用正文第九部分的 12 个月演示数据生成完整报告，并打印关键指标（累计收益 10.2058%、Sharpe 1.1254、IR 2.2327 等），不联网：
+
+```bash
+python examples/quickstart.py                 # 输出到 quickstart_output/（report.md、report.xlsx、图表）
+```
+
+生成的示例报告已提交在 [docs/examples/report.md](docs/examples/report.md)（含图表 PNG），可直接查看。
+
+**联网示例**：只给基金代码，自动取净值与分红、合同业绩比较基准（解析为全收益复合基准）与无风险利率：
+
+```bash
+fundeval report --fund 110020 --charts --out 110020.md   # 图表存到 110020_files/，--charts 须与 --out 一起用
+```
+
+更多真实基金代码的命令（`compare`、`--benchmark-map`、`--fx`、`--style auto`、`--factors`）与数据源不可达时的处理见 [examples/fund_code.md](examples/fund_code.md)。
+
+未安装、直接从源码运行时（如下载 zip 解压后），设置 `PYTHONPATH=src` 并用 `python -m fundeval` 代替 `fundeval`，例如 `python -m fundeval --version`。中文 Windows 下把输出重定向到文件或管道时（编码为 GBK），“M²”“−”等字符会写成“M^2”“-”；要保留原字符，用 `--out` 写文件（UTF-8）或设置 `PYTHONIOENCODING=utf-8`。
+
+## 功能与正文章节对照
+
+| 正文 | 模块 | 功能 |
+| --- | --- | --- |
+| [一 评价框架与数据准备](docs/投资组合绩效评估.md#framework) | `etl/`（schema、clean、returns、quality、benchmark、fx）、`etl/sources/`（files、akshare） | 标准收益表、本地文件读取、净值 → 单期收益、频率转换；akshare 取基金净值与分红、基金概况、指数、无风险利率与汇率中间价（重试、数据源自动切换、缓存）；合同业绩比较基准解析与复合基准、全收益代码、外币成分换算；数据质量报告与净值交叉核对 |
+| [二 收益衡量与计算口径](docs/投资组合绩效评估.md#returns) | `returns.py` | 累计与几何年化收益、累计收益差额、几何相对收益、TWR、IRR / XIRR / MWR |
+| [三 风险调整后的绩效衡量](docs/投资组合绩效评估.md#risk-adjusted) | `risk.py` | 波动率、最大回撤、Sharpe、跟踪误差、IR、Treynor、M² |
+| [四 Alpha 来源与能力判断](docs/投资组合绩效评估.md#alpha) | `alpha/`（regression、rolling、robustness、fundamental） | CAPM / 因子回归（OLS、HAC、可选 t 分布）、滚动 Alpha 与 IR、样本内外切分、剔除异常期的稳健性检验、主动管理基本定律 |
+| [五 风格分析与收益归因](docs/投资组合绩效评估.md#attribution) | `attribution/`（style、brinson、factor、campisi、timing） | 第 1 节 Sharpe 风格分析（含滚动权重、按基金类型选预设）；第 2 节 Brinson BHB / BF 与 Cariño 多期链接；第 3 节多因子分解与 A 股指数代理因子；第 4 节 Campisi 固收归因；第 5 节 Treynor–Mazuy、Henriksson–Merton 择时 |
+| [六 交易成本与策略容量](docs/投资组合绩效评估.md#costs) | `costs.py` | 换手率、线性交易成本、近似净 Alpha、容量检查、规模敏感性与平方根冲击模型 |
+| [七 持续风险监控与预警](docs/投资组合绩效评估.md#monitoring) | `monitor.py` | 滚动实现 TE、风险倍数、z 值、Green / Yellow / Red 分区 |
+| [八 下行风险与尾部风险](docs/投资组合绩效评估.md#tail-risk) | `tail.py` | 下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES |
+| [九 从原始数据到绩效结果](docs/投资组合绩效评估.md#worked-example) | `report/`（summary、export、charts、inputs）、`examples/quickstart.py` | 一键评价报告 `evaluate`、Markdown / Excel 导出、PNG 图表；第九部分演示数据是基准测试（`tests/test_worked_example.py`） |
+| [十 形成可用于管理决策的结论](docs/投资组合绩效评估.md#conclusion) | `report/`（summary 的三段结论、compare）、`cli.py` | 观察到的表现 / 可以支持的解释 / 需要进一步验证的判断；多基金横向对比；命令行 `fundeval report`、`fundeval compare` |
+
+尚未实现：Ken French 因子数据源（`etl/sources` 的 French 部分）。
+
+## 口径与已知限制
+
+- **全收益与价格指数**：基金净值含成分股分红，价格指数（如沪深 300 000300）不含。用价格指数作基准会把股息率计入超额收益与 Alpha：110020（2021-01 至 2025-12 月度）对 000300 的 CAPM 年化 Alpha 为 +2.15%（t = 3.94），对全收益 H00300 为 −0.18%（t = −1.07）。因此基准成分默认换成全收益指数（`--index-return-type total`）；没有全收益版本或收益类型未知的成分（如 H11001）沿用原代码，报告写明高估限定。
+- **指数代理因子与学术因子**：`cn_index_proxy` 的 SMB、HML 是只做多指数的收益差（中证1000 − 沪深300、沪深300价值 − 沪深300成长），不是 Fama–French 按市值与账面市值比分组构造的多空组合，系数与 Alpha 不能与学术因子直接比较。
+- **汇率换算**：非人民币基准成分（如中证香港300，港元）默认按国家外汇管理局人民币汇率中间价，在日度上换算为人民币收益 r_CNY = (1 + r_外币) × S_t / S_{t−1} − 1，S 取不晚于当日的最近中间价，不用未来数据；汇率取数失败时报错，`--fx none` 可不换算（口径写明）。
+- **数据源可达性**：中证指数官网最稳定；东方财富指数行情、中债网站经常不可达，Shibor 经常超时，基金页面偶尔超时。网络失败时一行中文错误并给出替代办法（`--index-source csindex`、`--rf` 列表或常数、`--benchmark-map`、`--fx none`），见 [examples/fund_code.md](examples/fund_code.md)。合同基准中解析不了的成分报错并列出，不做猜测，也不自动替换。
+- **样本长度与显著性阈值**：比率用同频算术均值与样本标准差（n − 1）乘以 √K 年化。样本少于 36 个月时结论只说“观察到模型未解释的收益”，不评价管理能力；|t| ≥ 1.96 只是大样本 5% 双侧的参考，小样本 HAC 回归建议加 `--use-t`；历史 VaR / ES 的尾部观测少于 5 个时注明仅供参考；稳健性只在 |t| 跨过 1.96 或符号改变且至少一边显著时算“敏感”。
+- **风格权重不等于持仓**：Sharpe 风格分析的权重是约束回归的统计估计，描述收益变化最接近哪些风格指数；残差均值不能直接视为选股能力。预设中没有的资产会落到相近的风格上（如 000001 用 `cn_equity` 时约 30% 落到现金）。
+- **公募净值已扣费**：基金单位净值已扣除管理费、托管费与交易成本（“费用后净值”），报告的 Alpha 即扣费后 Alpha，成本一节不重复扣减；费率只写入口径。基金总收益按单位净值加除息日分红计算（分红按“每10份”折算为每份）。
+- **监控阈值与冲击参数为演示值**：持续监控的分区阈值取正文演示值，需按策略校准；平方根冲击模型没有默认参数，须用成交记录校准。
+
+## 阅读正文
 
 - [在线阅读全文](docs/投资组合绩效评估.md)：含公式、案例图、归因表和 Excel 计算步骤。
 - [下载 Word 修订稿 v1](docs/投资组合绩效评估.docx)：适合离线阅读和继续编辑。
 
-## 文章目录
+### 文章目录
 
 | 章节 | 内容 |
 | --- | --- |
@@ -24,41 +78,21 @@
 | [九 从原始数据到绩效结果](docs/投资组合绩效评估.md#worked-example) | 12 个月演示数据、Excel 公式与计算结果 |
 | [十 形成可用于管理决策的结论](docs/投资组合绩效评估.md#conclusion) | 证据、结论与后续管理动作 |
 
-## 代码：fundeval 工具包
 
-`src/fundeval/` 按正文章节组织。当前已实现数据准备（本地文件与 akshare 数据源、频率转换、复合基准、数据质量报告）、收益衡量、风险调整指标、Alpha 回归与稳健性检验（含剔除异常期的敏感性分析）、Sharpe 风格分析、Brinson 归因、多因子分解（含 A 股指数代理因子）、Campisi 固收归因、择时模型、交易成本与策略容量、持续风险监控、下行及尾部风险，以及一键评价报告与命令行。只输入基金代码即可评价：自动取基金概况与合同业绩比较基准并解析成复合基准（非人民币成分按人民币汇率中间价换算）；也可多基金横向对比，报告可附 PNG 图表。
+## 详细用法
 
-| 模块 | 对应章节 | 状态 |
-| --- | --- | --- |
-| `etl/`（schema、sources/files、clean、returns：单期收益与 to_frequency 频率转换） | 一 数据准备 | 已实现 |
-| `etl/sources/akshare.py`（基金单位净值加分红的总收益、基金概况 `fund_profile`（类型、费率、合同基准原文，缓存 1 天）、中证指数目录 `index_catalog`（缓存 7 天）、人民币汇率中间价 `fx_rates`（国家外汇管理局，每单位外币折合人民币，缓存 1 天）、指数行情、Shibor / 国债利率换算、网络重试与数据源自动切换、带覆盖检查的本地缓存） | 一 数据准备 | 已实现（可选依赖 `data`） |
-| `etl/benchmark.py`（指数表与全收益代码、基准收益类型、复合基准合成、合同基准文字解析，`resolve_benchmark` 把合同基准逐项解析为代码、收益类型、币种与数据源）、`etl/quality.py`（数据质量报告、净值与日增长率交叉核对） | 一 数据准备 | 已实现 |
-| `etl/fx.py`（外币指数收益换算为人民币收益：r_CNY = (1 + r_外币) × S_t / S_t−1 − 1，asof 对齐中间价，不用未来数据） | 一 数据准备 | 已实现 |
-| `etl/sources` French 因子数据源 | 一 数据准备 | 待实现 |
-| `returns.py`（TWR、年化、MWR/XIRR、超额收益） | 二 收益衡量 | 已实现 |
-| `risk.py`（波动、回撤、Sharpe、IR、Treynor、M²） | 三 风险调整 | 已实现 |
-| `alpha/`（regression：因子与 CAPM 回归、HAC 标准误、可选 t 分布推断；rolling：滚动 Alpha/Beta、滚动 IR、样本内外切分；robustness：剔除异常期后重估 CAPM 与择时回归；fundamental：IR ≈ TC × IC × √BR） | 四 Alpha 来源 | 已实现 |
-| `attribution/style.py`（Sharpe 收益型风格分析：非负、和为 1 的约束回归，R²、残差均值与波动、共线性诊断、滚动风格权重）；`etl/benchmark.py` 的 `style_preset` 风格指数预设与 `auto_style_preset`（按基金类型选择预设） | 五 第 1 节 | 已实现 |
-| `attribution/brinson.py`（单期 BHB / BF、多期 Cariño 链接与对账） | 五 第 2 节 | 已实现 |
-| `attribution/timing.py`（Treynor–Mazuy、Henriksson–Merton） | 五 第 5 节 | 已实现 |
-| `attribution/factor.py`（多因子回归、因子暴露与收益贡献对账、A 股指数代理因子预设 `cn_index_proxy`） | 五 第 3 节 | 已实现 |
-| `attribution/campisi.py`（收入、利率、利差、剩余四项；关键期限久期版本；基金对基准的主动归因与对账） | 五 第 4 节 | 已实现 |
-| `costs.py`（换手率、线性交易成本、近似净 Alpha、逐资产容量检查、规模变化的成本敏感性与平方根冲击模型） | 六 交易成本 | 已实现（冲击参数须用成交记录校准） |
-| `monitor.py`（滚动实现 TE（K 须显式给出）、风险倍数、z 值、Green/Yellow/Red 分区、连续 Red） | 七 持续监控 | 已实现（阈值为演示值，需按策略校准） |
-| `tail.py`（下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES） | 八 尾部风险 | 已实现 |
-| `report/`（evaluate 按六个评价维度汇总，含多因子分解、收益来源的风格分析、成本与容量、剔除异常期的稳健性检验；conclusion 三段结论、to_markdown、to_excel；`compare` 多基金横向对比；`charts` 生成财富指数、回撤、滚动超额与 TE、滚动风格权重与多基金对比 PNG）与 `cli.py`（`fundeval report`、`fundeval compare`） | 九、十 | 已实现（图表为可选依赖 `plot`） |
-
-### 安装
+### 安装与测试
 
 ```bash
 pip install -e ".[data,excel,plot]" # data：akshare 数据源；excel：读写 xlsx；plot：matplotlib 图表
-pip install -e ".[test]" && pytest  # 测试不访问网络
+pip install -e ".[test]" && pytest  # 测试不访问网络；未安装 matplotlib 时图表测试跳过
 pytest -m network                   # 本地运行联网冒烟测试（需安装 data）
+python examples/quickstart.py --out docs/examples  # 重新生成 docs/examples 的示例报告与图表
 ```
 
 联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债、风格指数），一个数据源不可达不影响其他项。东方财富指数、Shibor 与中债三项遇到连接类或超时类异常（ConnectionError、requests.Timeout、UpstreamTimeout）时跳过并注明原因，列名、格式或数值错误仍然算失败（规则见 `tests/data/akshare/README.md`）。
 
-依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试。
+依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试，并运行一次 `examples/quickstart.py`（不联网），确保示例始终能跑通。
 
 ### 命令行
 
@@ -139,6 +173,7 @@ fundeval report --input tests/data/worked_example.csv \
 | `--target-active` / `--target-te` / `--window` | 无 | 三者同时给出时报告包含持续监控分区 |
 | `--tolerance` | `0.0005` | 净值推算收益与日增长率交叉核对容差（5 个基点） |
 | `--charts` | 关 | 生成 PNG 图表（需 `plot`，须与 `--out` 一起用）：Markdown 把图片存到“<报告名>_files/”并用相对路径嵌入，Excel 另加“图表”sheet |
+| `--quiet` | 关 | 不在标准错误输出警告；警告仍写入报告附注，错误信息照常输出 |
 | `--fees` / `--title` | `费用后净值` / 自动 | 费用口径说明与报告标题 |
 | `--cache-dir` / `--no-cache` / `--refresh` | `~/.fundeval/cache` | 原始数据缓存目录、关闭缓存、强制重新拉取 |
 | `--timeout` | `30` | 单个 HTTP 请求（连接与读取）的超时秒数。akshare 内部调用 requests 时多未设超时，请求可能无限挂起；分页接口每页单独计时；超时后按网络异常重试或切换数据源 |
@@ -147,6 +182,10 @@ fundeval report --input tests/data/worked_example.csv \
 无风险利率均按复利口径 (1 + y)^(1/K) − 1 换算为每期，并取期初已知的报价。组合与基准的对齐由 `evaluate` 完成，报告口径写明“组合 N 期、基准 M 期、共同 K 期”，被丢弃的期列入附注。
 
 数据源与缓存：超时分两层。`--timeout`（默认 30 秒，Python 中为各取数函数的 `timeout` 参数）限制每个 HTTP 请求的连接与读取，足以防止连接挂起；一次接口调用可能翻很多页，例如 Shibor 3M（`rate_interbank`）约 10 页、本地实测 44–119 秒，每页各自计时，不会因累计耗时而超时。`--total-timeout`（默认 300 秒，参数 `total_timeout`）限制一次接口调用的总时长，只作兜底，防止上游不经 requests 或反复慢而不断；它由后台线程实现，线程无法强行终止，超时后该线程可能仍在运行，其结果会被丢弃。两个参数设为 `None` 表示不启用对应一层。网络类异常（requests 异常、连接断开、超时）自动重试，共 3 次，指数退避；自动切换数据源时（指数东方财富 → 中证官网，无风险利率按顺序列表），非最后一个候选只尝试 1 次就切换，最后一个候选才重试 3 次，避免在不稳定的数据源上白等（本地实测 110011 全流程 196 秒中约 100 秒花在 Shibor 的 3 次读取超时上）；指数与无风险利率的自动切换都会发出警告，实际来源写入报告口径与附注。缓存命中时检查覆盖范围：数据最后日期早于截止日（或今天）之前最后一个工作日 7 天以上即重新拉取；不接受日期参数的接口（基金净值、Shibor、中债）与未给截止日的请求，缓存文件超过 1 天也会重新拉取（Python 中可用 `cache_lag_days`、`cache_max_age` 调整）。重新拉取失败时回退到旧缓存，但一定发出警告，并在报告附注中注明“使用 YYYY-MM-DD 的缓存数据”。网络失败导致无法出报告时，命令输出一行中文错误与替代办法，返回码 2。
+
+### 命令行警告
+
+取数与计算中的提示（如数据源自动切换、使用旧缓存、成分没有全收益版本）以每条一行“警告：<消息>”输出到标准错误，不显示源码路径与代码行，同一条消息只显示一次；`--quiet` 关闭这些输出。取数与评价阶段的警告同时写入报告附注（已在附注中的不重复），`--quiet` 不影响附注。在 Python 中调用 `evaluate`、`compare` 等函数时，仍按 Python 的 `warnings` 机制发出 `RuntimeWarning`，行为不变。
 
 ### 汇率换算
 
@@ -172,7 +211,7 @@ fundeval report --fund 000001 --benchmark-map "中债-综合全价(总值)=H1100
 
 ### 报告图表
 
-`--charts`（Python 中 `to_markdown(report, path, charts=True)`、`to_excel(report, path, charts=True)`，或直接调用 `fundeval.report.charts.report_charts`）生成以下 PNG：组合与基准的财富指数（期初 = 1）；回撤曲线，标出最大回撤的峰值、谷底与修复日期（未修复时注明）；滚动 12 期的超额收益（组合与基准滚动累计收益之差）与跟踪误差（年化），样本不足 12 期时不画并注明；有滚动风格分析（`--style-window`）时画风格权重的堆积面积图。`fundeval compare --charts` 把所有基金的财富指数（期初 = 1）画在同一张图上（最多 8 只）。Markdown 报告把图片保存到“<报告名>_files/”目录并用相对路径嵌入，Excel 报告另加“图表”sheet。图表使用 Agg 后端，不弹窗；中文字体依次查找 Microsoft YaHei、SimHei、PingFang SC、Noto Sans CJK SC、WenQuanYi 等，都没有时改用英文标签并发出警告，避免中文显示为方框。
+`--charts`（Python 中 `to_markdown(report, path, charts=True)`、`to_excel(report, path, charts=True)`，或直接调用 `fundeval.report.charts.report_charts`）生成以下 PNG：组合与基准的财富指数（期初 = 1）；回撤曲线，标出最大回撤的峰值、谷底与修复日期（未修复时注明）；滚动 12 期的超额收益（组合与基准滚动累计收益之差）与跟踪误差（年化），样本不超过 12 期（只有一个窗口）时不画并注明；有滚动风格分析（`--style-window`）时画风格权重的堆积面积图。`fundeval compare --charts` 把所有基金的财富指数（期初 = 1）画在同一张图上（最多 8 只）。Markdown 报告把图片保存到“<报告名>_files/”目录并用相对路径嵌入，Excel 报告另加“图表”sheet。图例一律放在坐标区之外，不压在曲线上：系列不超过 4 个时放在右侧，更多时放在下方。图表使用 Agg 后端，不弹窗；中文字体依次查找 Microsoft YaHei、SimHei、PingFang SC、Noto Sans CJK SC、WenQuanYi 等，都没有时改用英文标签并发出警告，避免中文显示为方框。
 
 ### 价格指数与全收益指数
 
@@ -288,21 +327,77 @@ report = evaluate(
 
 收益一律以小数表示（0.02 即 2%）。比率使用同频算术均值与样本标准差（n−1），乘以 √K 年化；分母为零时返回 NaN，表示不适用；缺失值只标记，不填零。基金总收益以单位净值加除息日分红计算，累计净值没有做分红再投资，不能直接当复权净值使用。`tests/test_worked_example.py` 用第九部分的演示数值作为基准测试，`evaluate` 在同一数据上给出一致的结果。
 
+
+## 版本与更新日志
+
+版本号的唯一来源是 `src/fundeval/_version.py`（pyproject 动态读取），`fundeval --version` 显示版本。各版本的新增、修正与口径变化见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 仓库结构
 
+源码按正文章节组织：`etl/` 对应第一部分的数据准备，顶层模块与子包按正文第二至第八部分划分，`report/` 对应第九、十部分。注释中的中文数字即正文章节。
+
 ```text
-.
-├── README.md                     # 简介、目录与阅读入口
-├── pyproject.toml                # fundeval 包配置与依赖
-├── .github/workflows/tests.yml   # CI：多版本 Python 运行 pytest
+portfolio-performance-evaluation/
+├── README.md                     # 快速开始、功能与正文对照、口径与详细用法
+├── CHANGELOG.md                  # 更新日志
+├── pyproject.toml                # 包配置与依赖；可选依赖 data / excel / plot / test
+├── .github/workflows/tests.yml   # CI：Python 3.10–3.12 运行 pytest 与 quickstart
 ├── docs/
-│   ├── 投资组合绩效评估.md        # 完整正文
-│   ├── 投资组合绩效评估.docx      # Word 修订稿 v1
-│   └── assets/
-│       └── style-weights.png      # 文章案例图
-├── src/fundeval/                 # 工具包源码
-└── tests/                        # 单元测试与第九部分基准测试
+│   ├── 投资组合绩效评估.md       # 正文：全部方法与口径的依据
+│   ├── 投资组合绩效评估.docx     # Word 修订稿 v1
+│   ├── assets/                   # 正文案例图
+│   └── examples/                 # quickstart 生成的示例报告与图表
+│
+├── src/fundeval/
+│   ├── cli.py                    # 命令行：fundeval report 一键评价，fundeval compare 横向对比
+│   ├── __main__.py               # python -m fundeval，与命令行相同
+│   ├── _version.py               # 版本号的唯一来源
+│   ├── _utils.py                 # 内部工具：输入统一为 Series、对齐、安全除法
+│   ├── _console.py               # 命令行输出的编码兜底
+│   │
+│   ├── etl/                      # ★ 数据前期准备（对应正文一）
+│   │   ├── schema.py             #   标准数据结构与校验：收益表、净值、现金流；频率 → K
+│   │   ├── sources/              #   数据读取
+│   │   │   ├── files.py          #     CSV / Excel 导入
+│   │   │   └── akshare.py        #     基金净值与分红、基金概况、指数、无风险利率、汇率（可选）
+│   │   ├── benchmark.py          #   基准（一.1）：合同基准解析、全收益指数映射、复合基准、风格预设
+│   │   ├── fx.py                 #   外币指数收益换算为人民币（汇率中间价）
+│   │   ├── clean.py              #   清洗：日期对齐 → 币种统一 → 缺失与异常复核 → 停牌标记
+│   │   ├── returns.py            #   净值 / 价格加分红 / 资产值 → 单期收益；日度 → 周、月、季
+│   │   └── quality.py            #   数据质量报告：缺失、异常、停牌或估值滞后、净值与日增长率核对
+│   │
+│   ├── returns.py                # 二：TWR、MWR/XIRR、年化、累计差额与几何相对收益
+│   ├── risk.py                   # 三：波动率、最大回撤、Sharpe、TE、IR、Treynor、Jensen Alpha、M²
+│   ├── tail.py                   # 八：下行偏差、Sortino、Calmar、历史 VaR / ES
+│   ├── alpha/                    # 四：Alpha 证据
+│   │   ├── regression.py         #   CAPM / 多因子回归，Newey-West 稳健 t 值
+│   │   ├── rolling.py            #   滚动 Alpha、Beta、IR，样本外切分
+│   │   ├── robustness.py         #   稳健性：剔除异常期后重估 CAPM、TM、HM
+│   │   └── fundamental.py        #   IC、有效广度、主动管理基本定律
+│   ├── attribution/              # 五：收益来源
+│   │   ├── style.py              #   Sharpe 风格分析（非负、和为 1 的约束回归），含滚动
+│   │   ├── brinson.py            #   BHB / BF 单期归因 + Cariño 多期链接
+│   │   ├── factor.py             #   多因子分解：A 股指数代理因子 MKT / SMB / HML，可加自定义因子
+│   │   ├── campisi.py            #   固收：收入 / 利率 / 利差 / 剩余，含关键期限久期
+│   │   └── timing.py             #   TM、HM 择时模型
+│   ├── costs.py                  # 六：换手率、交易成本、净 Alpha、容量敏感性
+│   ├── monitor.py                # 七：滚动 TE、风险倍数、z 值、Green / Yellow / Red 分区
+│   └── report/                   # 九、十：汇总与结论
+│       ├── inputs.py             #   取数与组装：基金代码或本地文件 → 收益、基准、无风险、风格、因子
+│       ├── summary.py            #   一键评价：六个维度的指标、回归、稳健性与三段式结论
+│       ├── compare.py            #   多基金横向对比（不做综合打分）
+│       ├── charts.py             #   图表：财富指数、回撤、滚动超额与 TE、风格权重（可选）
+│       └── export.py             #   导出 Excel / Markdown 报告
+│
+├── tests/                        # 用正文第九部分的演示数据做基准测试
+│   │                             # 例如累计收益必须等于 10.2058%、IR 等于 2.2327
+│   ├── data/                     #   演示数据，以及按 akshare 真实返回格式录制的样本
+│   └── fake_akshare.py           #   离线模拟 akshare，测试全程不联网
+└── examples/                     # 示例：从原始净值到评价结论
+    ├── quickstart.py             #   离线：第九部分演示数据 → 完整报告
+    └── fund_code.md              #   联网：真实基金代码的命令与数据源替代办法
 ```
+
 
 ## 数据说明
 

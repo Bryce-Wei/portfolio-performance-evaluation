@@ -24,3 +24,5 @@ jobs:
           pip install -e ".[test,excel,plot]"
       - name: Test
         run: pytest
+      - name: Quickstart example (offline)
+        run: python examples/quickstart.py --out "$RUNNER_TEMP/quickstart"

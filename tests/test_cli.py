@@ -65,17 +65,17 @@ def test_report_errors_are_reported(tmp_path, capsys):
     assert code == 2
 
 
-def test_report_from_akshare_with_fake_interfaces(monkeypatch, tmp_path):
+def test_report_from_akshare_with_fake_interfaces(monkeypatch, tmp_path, capsys):
     fake = FakeAkshare()
     monkeypatch.setattr(aks, "_ak", lambda: fake)
     out = tmp_path / "fund.md"
-    with pytest.warns(RuntimeWarning, match="日增长率"):
-        code = cli.main([
-            "report", "--fund", "110011", "--benchmark", "000300:0.8,H11001:0.2",
-            "--start", "2024-01-01", "--end", "2024-02-29", "--freq", "W", "--rf", "shibor3m",
-            "--cache-dir", str(tmp_path / "cache"), "--out", str(out),
-        ])
+    code = cli.main([
+        "report", "--fund", "110011", "--benchmark", "000300:0.8,H11001:0.2",
+        "--start", "2024-01-01", "--end", "2024-02-29", "--freq", "W", "--rf", "shibor3m",
+        "--cache-dir", str(tmp_path / "cache"), "--out", str(out),
+    ])
     assert code == 0
+    assert any(line.startswith("警告：") and "日增长率" in line for line in capsys.readouterr().err.splitlines())
     text = out.read_text(encoding="utf-8")
     assert "基金 110011" in text and "000300:0.8,H11001:0.2" in text
     assert "Shibor 3M" in text and "(1 + y)^(1/52) − 1" in text

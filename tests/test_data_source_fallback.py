@@ -3,6 +3,8 @@
 akshare 行为一律用 tests/fake_akshare.py 模拟，不访问网络。
 """
 
+import contextlib
+import io
 import os
 import time
 import warnings
@@ -95,9 +97,11 @@ def _fund_report(monkeypatch, tmp_path, *extra, fake=None):
         "report", "--fund", "110011", "--start", START, "--end", END, "--freq", "W",
         "--cache-dir", str(tmp_path / "cache"), "--out", str(out), *extra,
     ]
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    # CLI 把警告写成标准错误中的“警告：<消息>”行，这里收集这些行的消息
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
         code = cli.main(args)
+    caught = [line.removeprefix("警告：") for line in err.getvalue().splitlines() if line.startswith("警告：")]
     return code, (out.read_text(encoding="utf-8") if out.exists() else ""), fake, caught
 
 
@@ -226,8 +230,7 @@ def test_cli_records_fallback_sources_in_report(monkeypatch, tmp_path, sleeps):
     assert "中国国债 2 年期收益率（Shibor 3M 获取失败后改用）" in text
     notes = text.split("## 附注")[1].split("## 结论")[0]
     assert "东方财富 index_zh_a_hist 请求失败" in notes and "已改用中国国债 2 年期收益率" in notes
-    messages = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
-    assert any("已改用中证指数官网" in m for m in messages) and any("已改用中国国债" in m for m in messages)
+    assert any("已改用中证指数官网" in m for m in caught) and any("已改用中国国债" in m for m in caught)
 
 
 # ------------------------------ 三、CLI 网络错误提示 ------------------------------
@@ -235,12 +238,10 @@ def test_cli_records_fallback_sources_in_report(monkeypatch, tmp_path, sleeps):
 
 def test_cli_network_error_prints_one_chinese_line(monkeypatch, tmp_path, capsys, sleeps):
     use(monkeypatch, FakeAkshare(fail={"index_zh_a_hist": EM_DOWN}))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        code = cli.main([
-            "report", "--fund", "110011", "--benchmark", "000300", "--index-source", "em", "--rf", "0.018",
-            "--start", START, "--end", END, "--cache-dir", str(tmp_path / "cache"),
-        ])
+    code = cli.main([
+        "report", "--fund", "110011", "--benchmark", "000300", "--index-source", "em", "--rf", "0.018",
+        "--start", START, "--end", END, "--cache-dir", str(tmp_path / "cache"), "--quiet",
+    ])
     err = capsys.readouterr().err
     assert code == 2
     assert "Traceback" not in err and len(err.strip().splitlines()) == 1
