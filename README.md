@@ -18,7 +18,7 @@ pip install -e ".[data,excel,plot]"   # data：akshare 数据源；excel：Excel
 python examples/quickstart.py                 # 输出到 quickstart_output/（report.md、report.xlsx、图表）
 ```
 
-生成的示例报告已提交在 [docs/examples/report.md](docs/examples/report.md)（含图表 PNG），可直接查看。
+生成的示例报告已提交在 [docs/examples/report.md](docs/examples/report.md)（含图表 PNG），可直接查看。按正文顺序逐步演示（读取与清洗 → 数据质量 → 收益与风险 → 尾部 → Alpha → Brinson → 监控 → 报告与结论）的 notebook 见 [examples/walkthrough.ipynb](examples/walkthrough.ipynb)，同样不联网。
 
 **联网示例**：只给基金代码，自动取净值与分红、合同业绩比较基准（解析为全收益复合基准）与无风险利率：
 
@@ -26,7 +26,11 @@ python examples/quickstart.py                 # 输出到 quickstart_output/（r
 fundeval report --fund 110020 --charts --out 110020.md   # 图表存到 110020_files/，--charts 须与 --out 一起用
 ```
 
-更多真实基金代码的命令（`compare`、`--benchmark-map`、`--fx`、`--style auto`、`--factors`）与数据源不可达时的处理见 [examples/fund_code.md](examples/fund_code.md)。
+更多真实基金代码的命令（`compare`、`--benchmark-map`、`--fx`、`--style auto`、`--factors`）与数据源不可达时的处理见 [examples/fund_code.md](examples/fund_code.md)。评价口径（区间、频率、基准、无风险收益、费用口径等）可以写在 TOML 配置文件里，用 `--config` 读取，命令行显式给出的参数覆盖配置，见 [examples/config.toml](examples/config.toml)：
+
+```bash
+fundeval report --fund 110020 --config examples/config.toml --out 110020.md
+```
 
 未安装、直接从源码运行时（如下载 zip 解压后），设置 `PYTHONPATH=src` 并用 `python -m fundeval` 代替 `fundeval`，例如 `python -m fundeval --version`。中文 Windows 下把输出重定向到文件或管道时（编码为 GBK），“M²”“−”等字符会写成“M^2”“-”；要保留原字符，用 `--out` 写文件（UTF-8）或设置 `PYTHONIOENCODING=utf-8`。
 
@@ -34,26 +38,26 @@ fundeval report --fund 110020 --charts --out 110020.md   # 图表存到 110020_f
 
 | 正文 | 模块 | 功能 |
 | --- | --- | --- |
-| [一 评价框架与数据准备](docs/投资组合绩效评估.md#framework) | `etl/`（schema、clean、returns、quality、benchmark、fx）、`etl/sources/`（files、akshare） | 标准收益表、本地文件读取、净值 → 单期收益、频率转换；akshare 取基金净值与分红、基金概况、指数、无风险利率与汇率中间价（重试、数据源自动切换、缓存）；合同业绩比较基准解析与复合基准、全收益代码、外币成分换算；数据质量报告与净值交叉核对 |
+| [一 评价框架与数据准备](docs/投资组合绩效评估.md#framework) | `config.py`、`etl/`（schema、clean、returns、quality、benchmark、fx）、`etl/sources/`（files、akshare、french） | 评价口径配置（`EvaluationConfig`、TOML、`--config`）；标准收益表、持仓表与成交表、本地文件读取、现金流识别与期中大额现金流标记、净值 → 单期收益、频率转换；akshare 取基金净值与分红、基金概况、指数、无风险利率与汇率中间价（重试、数据源自动切换、缓存）；合同业绩比较基准解析与复合基准、全收益代码、外币成分换算；数据质量报告（含样本长度检查）与净值交叉核对；French 因子库 |
 | [二 收益衡量与计算口径](docs/投资组合绩效评估.md#returns) | `returns.py` | 累计与几何年化收益、累计收益差额、几何相对收益、TWR、IRR / XIRR / MWR |
 | [三 风险调整后的绩效衡量](docs/投资组合绩效评估.md#risk-adjusted) | `risk.py` | 波动率、最大回撤、Sharpe、跟踪误差、IR、Treynor、M² |
 | [四 Alpha 来源与能力判断](docs/投资组合绩效评估.md#alpha) | `alpha/`（regression、rolling、robustness、fundamental） | CAPM / 因子回归（OLS、HAC、可选 t 分布）、滚动 Alpha 与 IR、样本内外切分、剔除异常期的稳健性检验、主动管理基本定律 |
-| [五 风格分析与收益归因](docs/投资组合绩效评估.md#attribution) | `attribution/`（style、brinson、factor、campisi、timing） | 第 1 节 Sharpe 风格分析（含滚动权重、按基金类型选预设）；第 2 节 Brinson BHB / BF 与 Cariño 多期链接；第 3 节多因子分解与 A 股指数代理因子；第 4 节 Campisi 固收归因；第 5 节 Treynor–Mazuy、Henriksson–Merton 择时 |
+| [五 风格分析与收益归因](docs/投资组合绩效评估.md#attribution) | `attribution/`（style、brinson、factor、campisi、timing） | 第 1 节 Sharpe 风格分析（含滚动权重、按基金类型选预设）；第 2 节 Brinson BHB / BF 与 Cariño 多期链接；第 3 节多因子分解：A 股指数代理三因子 / 四因子与 Fama–French 美国市场因子；第 4 节 Campisi 固收归因；第 5 节 Treynor–Mazuy、Henriksson–Merton 择时 |
 | [六 交易成本与策略容量](docs/投资组合绩效评估.md#costs) | `costs.py` | 换手率、线性交易成本、近似净 Alpha、容量检查、规模敏感性与平方根冲击模型 |
 | [七 持续风险监控与预警](docs/投资组合绩效评估.md#monitoring) | `monitor.py` | 滚动实现 TE、风险倍数、z 值、Green / Yellow / Red 分区 |
 | [八 下行风险与尾部风险](docs/投资组合绩效评估.md#tail-risk) | `tail.py` | 下行偏差、Sortino、Calmar、历史模拟 VaR 与 ES |
-| [九 从原始数据到绩效结果](docs/投资组合绩效评估.md#worked-example) | `report/`（summary、export、charts、inputs）、`examples/quickstart.py` | 一键评价报告 `evaluate`、Markdown / Excel 导出、PNG 图表；第九部分演示数据是基准测试（`tests/test_worked_example.py`） |
+| [九 从原始数据到绩效结果](docs/投资组合绩效评估.md#worked-example) | `report/`（summary、export、charts、inputs）、`examples/quickstart.py`、`examples/walkthrough.ipynb` | 一键评价报告 `evaluate`、Markdown / Excel 导出、PNG 图表；第九部分演示数据是基准测试（`tests/test_worked_example.py`） |
 | [十 形成可用于管理决策的结论](docs/投资组合绩效评估.md#conclusion) | `report/`（summary 的三段结论、compare）、`cli.py` | 观察到的表现 / 可以支持的解释 / 需要进一步验证的判断；多基金横向对比；命令行 `fundeval report`、`fundeval compare` |
 
-尚未实现：Ken French 因子数据源（`etl/sources` 的 French 部分）。
 
 ## 口径与已知限制
 
 - **全收益与价格指数**：基金净值含成分股分红，价格指数（如沪深 300 000300）不含。用价格指数作基准会把股息率计入超额收益与 Alpha：110020（2021-01 至 2025-12 月度）对 000300 的 CAPM 年化 Alpha 为 +2.15%（t = 3.94），对全收益 H00300 为 −0.18%（t = −1.07）。因此基准成分默认换成全收益指数（`--index-return-type total`）；没有全收益版本或收益类型未知的成分（如 H11001）沿用原代码，报告写明高估限定。
-- **指数代理因子与学术因子**：`cn_index_proxy` 的 SMB、HML 是只做多指数的收益差（中证1000 − 沪深300、沪深300价值 − 沪深300成长），不是 Fama–French 按市值与账面市值比分组构造的多空组合，系数与 Alpha 不能与学术因子直接比较。
+- **指数代理因子与学术因子**：`cn_index_proxy` 的 SMB、HML 是只做多指数的收益差（中证1000 − 沪深300、沪深300价值 − 沪深300成长），`cn_index_proxy4` 的 UMD 是沪深300动量 H30260 − 沪深300 000300（两者都是价格指数，H30260 的全收益代码未知），都不是 Fama–French 按市值、账面市值比或过去收益分组构造的多空组合，系数与 Alpha 不能与学术因子直接比较。
+- **美国市场因子**：`ff3_us`、`carhart_us` 取自 Kenneth R. French Data Library，是美国市场因子、以美元计价，回归用因子库的 RF（美国 1 个月国库券），适合投资美股的 QDII 等基金；人民币计价的基金收益含汇率影响，A 股基金应使用 `cn_index_proxy` 系列。因子库只有月度与年度数据，`--factors ff3_us / carhart_us` 须用 `--freq M`。
 - **汇率换算**：非人民币基准成分（如中证香港300，港元）默认按国家外汇管理局人民币汇率中间价，在日度上换算为人民币收益 r_CNY = (1 + r_外币) × S_t / S_{t−1} − 1，S 取不晚于当日的最近中间价，不用未来数据；汇率取数失败时报错，`--fx none` 可不换算（口径写明）。
 - **数据源可达性**：中证指数官网最稳定；东方财富指数行情、中债网站经常不可达，Shibor 经常超时，基金页面偶尔超时。网络失败时一行中文错误并给出替代办法（`--index-source csindex`、`--rf` 列表或常数、`--benchmark-map`、`--fx none`），见 [examples/fund_code.md](examples/fund_code.md)。合同基准中解析不了的成分报错并列出，不做猜测，也不自动替换。
-- **样本长度与显著性阈值**：比率用同频算术均值与样本标准差（n − 1）乘以 √K 年化。样本少于 36 个月时结论只说“观察到模型未解释的收益”，不评价管理能力；|t| ≥ 1.96 只是大样本 5% 双侧的参考，小样本 HAC 回归建议加 `--use-t`；历史 VaR / ES 的尾部观测少于 5 个时注明仅供参考；稳健性只在 |t| 跨过 1.96 或符号改变且至少一边显著时算“敏感”。
+- **样本长度与显著性阈值**：比率用同频算术均值与样本标准差（n − 1）乘以 √K 年化。样本少于 36 个月（或其他频率的等价期数）时，数据质量报告写明“样本较短，统计推断与能力判断受限”，结论只说“观察到模型未解释的收益”，不评价管理能力；|t| ≥ 1.96 只是大样本 5% 双侧的参考，小样本 HAC 回归建议加 `--use-t`；历史 VaR / ES 的尾部观测少于 5 个时注明仅供参考；稳健性只在 |t| 跨过 1.96 或符号改变且至少一边显著时算“敏感”。
 - **风格权重不等于持仓**：Sharpe 风格分析的权重是约束回归的统计估计，描述收益变化最接近哪些风格指数；残差均值不能直接视为选股能力。预设中没有的资产会落到相近的风格上（如 000001 用 `cn_equity` 时约 30% 落到现金）。
 - **公募净值已扣费**：基金单位净值已扣除管理费、托管费与交易成本（“费用后净值”），报告的 Alpha 即扣费后 Alpha，成本一节不重复扣减；费率只写入口径。基金总收益按单位净值加除息日分红计算（分红按“每10份”折算为每份）。
 - **监控阈值与冲击参数为演示值**：持续监控的分区阈值取正文演示值，需按策略校准；平方根冲击模型没有默认参数，须用成交记录校准。
@@ -86,13 +90,14 @@ fundeval report --fund 110020 --charts --out 110020.md   # 图表存到 110020_f
 ```bash
 pip install -e ".[data,excel,plot]" # data：akshare 数据源；excel：读写 xlsx；plot：matplotlib 图表
 pip install -e ".[test]" && pytest  # 测试不访问网络；未安装 matplotlib 时图表测试跳过
-pytest -m network                   # 本地运行联网冒烟测试（需安装 data）
+pytest -m network                   # 本地运行联网冒烟测试（需安装 data；French 因子库只需联网）
+pytest tests/test_notebook.py       # 在临时目录中逐个执行 examples/walkthrough.ipynb 的代码单元（不需要 Jupyter）
 python examples/quickstart.py --out docs/examples  # 重新生成 docs/examples 的示例报告与图表
 ```
 
-联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债、风格指数），一个数据源不可达不影响其他项。东方财富指数、Shibor 与中债三项遇到连接类或超时类异常（ConnectionError、requests.Timeout、UpstreamTimeout）时跳过并注明原因，列名、格式或数值错误仍然算失败（规则见 `tests/data/akshare/README.md`）。
+联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债、风格指数、French 因子库、沪深300动量 H30260），一个数据源不可达不影响其他项。东方财富指数、Shibor 与中债三项遇到连接类或超时类异常（ConnectionError、requests.Timeout、UpstreamTimeout）时跳过并注明原因，列名、格式或数值错误仍然算失败（规则见 `tests/data/akshare/README.md`）。
 
-依赖：pandas、numpy、scipy、statsmodels；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试，并运行一次 `examples/quickstart.py`（不联网），确保示例始终能跑通。
+依赖：pandas、numpy、scipy、statsmodels，Python 3.10 另需 tomli（读取 `--config` 的 TOML，3.11 起用标准库 tomllib）；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试，并单列一步执行 `examples/walkthrough.ipynb` 的测试、运行一次 `examples/quickstart.py`（均不联网），确保示例始终能跑通。
 
 ### 命令行
 
@@ -157,6 +162,7 @@ fundeval report --input tests/data/worked_example.csv \
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
+| `--config` | 无 | 评价口径配置文件（TOML，见 [examples/config.toml](examples/config.toml)）：先读配置，再用命令行显式给出的参数覆盖；未知的节或键报错并列出可选键。报告口径写明“配置来源：<文件>（命令行覆盖：…）”。置信水平、稳健性开关与日度 K 只能写在配置中 |
 | `--fund` / `--input` | 二选一 | 基金代码（经 akshare 取单位净值与分红，并取基金概况写入口径）或本地收益表 |
 | `--benchmark` | `--fund` 时为 `contract` | `contract`（取基金合同业绩比较基准并解析）、`"000300:0.8,H11001:0.2"`（代码:权重）、单个代码或合同基准文字 |
 | `--benchmark-map` | 无 | 合同基准中无法自动解析的成分：`"名称=代码"`，逗号分隔，如 `"中债总指数=cbond:composite"`；现金写 `cash:0.02` |
@@ -166,7 +172,7 @@ fundeval report --input tests/data/worked_example.csv \
 | `--index-source` | `auto` | `auto`：H 开头等中证代码走中证指数官网，纯数字代码先试东方财富、网络失败后改用中证官网；也可指定 `em` 或 `csindex` |
 | `--rf` | `auto` | `auto`：`--fund` 时等价于 `shibor3m,cgb2y`，依次尝试，全部失败时报错并提示改用常数；本地文件（无 risk_free 列时）按 0 计。也可取单个来源 `shibor3m`、`shibor1m`、`shibor_on`、`cgb2y`、`cgb10y`，逗号分隔的顺序列表（如 `cgb2y,shibor3m`），或常数年化利率（如 `0.018`） |
 | `--style` / `--style-window` | 无 | 风格分析：`auto`（需 `--fund`，按基金类型选择预设，见下文）、预设名 `cn_equity`（沪深300成长 H00918、沪深300价值 H00919、中证500 H00905、中证1000 H00852、现金）、`cn_balanced`（再加中证全债 H11001，收益类型未知，报告注明），或逗号分隔的代码列表（`cash` 表示无风险收益）。指数按 `--index-return-type` 默认换成全收益代码，数据源与收益类型写入口径；`--style-window` 另附滚动权重，窗口不小于风格资产数 + 2 |
-| `--factors` | 无 | 多因子分解的因子预设。`cn_index_proxy`：MKT = 沪深300全收益 H00300 − 无风险收益，SMB = 中证1000全收益 H00852 − H00300，HML = 沪深300价值全收益 H00919 − 沪深300成长全收益 H00918，均经中证指数官网取数；不含 UMD。报告在“Alpha 质量”一节给出多因子 Alpha（每期、算术年化、t、p）与因子暴露、贡献表，回归沿用 `--hac-lags` 与 `--use-t` |
+| `--factors` | 无 | 多因子分解的因子预设。`cn_index_proxy`：MKT = 沪深300全收益 H00300 − 无风险收益，SMB = 中证1000全收益 H00852 − H00300，HML = 沪深300价值全收益 H00919 − 沪深300成长全收益 H00918，均经中证指数官网取数。`cn_index_proxy4`：再加 UMD = 沪深300动量 H30260 − 沪深300 000300（均为价格指数，不做全收益替换）。`ff3_us` / `carhart_us`：French 因子库的美国市场 MKT（Mkt-RF）、SMB、HML（及 UMD = Mom），美元计价，回归用因子库 RF，须 `--freq M`。报告在“Alpha 质量”一节给出多因子 Alpha（每期、算术年化、t、p）与因子暴露、贡献表，回归沿用 `--hac-lags` 与 `--use-t` |
 | `--freq` / `--input-freq` | `M` / 同 `--freq` | 评价频率；`--input-freq D --freq M` 先把日度收益按期内复利合成为月度 |
 | `--hac-lags` / `--use-t` | 无 / 关 | Newey–West 标准误的滞后阶数；`--use-t` 让 HAC 的 p 值与置信区间也用 t 分布。月度样本不足 120 期且使用 HAC 时建议加 `--use-t`，否则正态近似会高估显著性 |
 | `--mar` | 无风险收益 | Sortino 的最低可接受收益（每期，小数） |
@@ -236,7 +242,9 @@ Sharpe 收益型风格分析（正文第五部分第 1 节）用约束回归 r_p
 
 `attribution.factor.factor_decomposition(returns, factors, risk_free, hac_lags, use_t)` 复用 `factor_regression` 做 r_p − r_f = α + Σ β_k F_k + ε，另给出各因子的收益贡献 β_k × mean(F_k)（每期；`annualized_contributions(K)` 为算术年化），并按 mean(r_p − r_f) = α + Σ 贡献 + mean(ε) 逐项对账，对不上时报错。`table(K)` 为因子暴露表（系数、t、p、因子均值、贡献），`exposure_text()` 写出显著暴露及方向（如“HML 显著为正，提示价值暴露”）。
 
-`index_proxy_factors(index_returns, risk_free)` 按预设 `cn_index_proxy` 构造 MKT、SMB、HML，`extra=` 可并入自定义因子列（如经过核实的动量因子；默认不构造 UMD）。
+`index_proxy_factors(index_returns, risk_free, preset)` 按预设构造指数代理因子：`cn_index_proxy` 为 MKT、SMB、HML；`cn_index_proxy4` 再加 UMD = 沪深300动量 H30260 − 沪深300 000300。UMD 两条腿都用价格指数，保证分红口径一致（H30260 的全收益代码未知，不猜测），预设中的代码按原样取数，不受 `--index-return-type total` 的全收益替换影响。`extra=` 可并入自定义因子列。
+
+**Fama–French 因子库**：`etl.sources.french.french_factors(dataset, freq="M")` 下载 Kenneth R. French Data Library 的 zip（如 `F-F_Research_Data_Factors`、`F-F_Momentum_Factor`），只取月度或年度段，百分数换算为小数，月度索引为当月月末，−99.99 / −999 记为缺失（不填补），缓存 7 天，重试、单请求超时与缓存回退同 akshare 数据源；`carhart_factors()` 合并为 MKT、SMB、HML、UMD、RF。`attribution.factor.us_market_factors(library, "ff3_us" | "carhart_us")` 取出因子列与 RF，`evaluate(..., factor_returns=factors, factor_risk_free=rf)` 用因子库 RF 计算超额收益，口径与结论写明美国市场、美元计价的限定。
 
 **指数代理因子与学术因子的区别**：Fama–French 因子按市值与账面市值比把全市场股票分组，构造多空组合（SMB 为小盘组减大盘组、HML 为高 B/M 组减低 B/M 组），组内市值加权并定期再平衡。`cn_index_proxy` 只是两只只做多的指数收益相减：中证1000 与沪深300 的差异同时包含市值、行业结构与成分调整规则；沪深300价值与成长的划分依据中证的风格评分，且只在沪深300 成分内。因此代理因子的系数只描述基金相对这些指数差值的暴露，不能与学术因子（如 Fama–French 或其他学术 A 股因子）的系数、Alpha 直接比较；报告口径与结论都会写明这一限定。
 
@@ -292,6 +300,21 @@ factors = index_proxy_factors(indices, df.risk_free)  # indices：含 H00300、H
 fd = factor_decomposition(df.portfolio, factors, df.risk_free, hac_lags=3, use_t=True)
 fd.table(12); fd.reconciliation(12); fd.exposure_text()
 report = evaluate(df, periods_per_year=12, factor_returns=factors, costs={"turnover": 1.0, "unit_cost": 0.002})
+
+from fundeval.config import EvaluationConfig, load_config
+cfg = load_config("examples/config.toml")  # 或 EvaluationConfig(freq="M", hac_lags=3, use_t=True, confidence=0.95)
+report = evaluate(df, config=EvaluationConfig(hac_lags=2, use_t=True))  # 关键字参数与 config 同时给出时，关键字参数优先
+
+from fundeval.etl import clean, schema
+wp = schema.sector_weights(holdings)  # holdings：date、asset、sector、weight 列，现金单列为行业“现金”，每期权重和为 1
+schema.turnover_from_trades(trades, average_nav=1e8)  # trades：date、asset、side（buy/sell）、amount、price、fee
+flows = clean.infer_cashflows(units, nav)  # 份额变动 × 单位净值，净申购为正
+clean.flag_large_cashflows(flows, assets.shift(1))  # 超过期初资产 5% 的期中大额现金流，应拆分子期
+
+from fundeval.etl.sources import french
+from fundeval.attribution.factor import us_market_factors
+us_factors, us_rf = us_market_factors(french.carhart_factors(), "carhart_us")  # 美国市场因子，美元计价
+report = evaluate(qdii_returns, factor_returns=us_factors, factor_risk_free=us_rf)
 
 from fundeval.attribution.campisi import campisi, campisi_active
 campisi_active(
@@ -351,6 +374,7 @@ portfolio-performance-evaluation/
 ├── src/fundeval/
 │   ├── cli.py                    # 命令行：fundeval report 一键评价，fundeval compare 横向对比
 │   ├── __main__.py               # python -m fundeval，与命令行相同
+│   ├── config.py                 # 评价口径（一.1）：EvaluationConfig 与 TOML 配置读取
 │   ├── _version.py               # 版本号的唯一来源
 │   ├── _utils.py                 # 内部工具：输入统一为 Series、对齐、安全除法
 │   ├── _console.py               # 命令行输出的编码兜底
@@ -359,7 +383,8 @@ portfolio-performance-evaluation/
 │   │   ├── schema.py             #   标准数据结构与校验：收益表、净值、现金流；频率 → K
 │   │   ├── sources/              #   数据读取
 │   │   │   ├── files.py          #     CSV / Excel 导入
-│   │   │   └── akshare.py        #     基金净值与分红、基金概况、指数、无风险利率、汇率（可选）
+│   │   │   ├── akshare.py        #     基金净值与分红、基金概况、指数、无风险利率、汇率（可选）
+│   │   │   └── french.py         #     Fama-French 因子库：美国市场三因子与动量（美元计价）
 │   │   ├── benchmark.py          #   基准（一.1）：合同基准解析、全收益指数映射、复合基准、风格预设
 │   │   ├── fx.py                 #   外币指数收益换算为人民币（汇率中间价）
 │   │   ├── clean.py              #   清洗：日期对齐 → 币种统一 → 缺失与异常复核 → 停牌标记
@@ -377,7 +402,7 @@ portfolio-performance-evaluation/
 │   ├── attribution/              # 五：收益来源
 │   │   ├── style.py              #   Sharpe 风格分析（非负、和为 1 的约束回归），含滚动
 │   │   ├── brinson.py            #   BHB / BF 单期归因 + Cariño 多期链接
-│   │   ├── factor.py             #   多因子分解：A 股指数代理因子 MKT / SMB / HML，可加自定义因子
+│   │   ├── factor.py             #   四因子暴露分解：A 股指数代理（cn_index_proxy / cn_index_proxy4）与 Fama-French（ff3_us / carhart_us）
 │   │   ├── campisi.py            #   固收：收入 / 利率 / 利差 / 剩余，含关键期限久期
 │   │   └── timing.py             #   TM、HM 择时模型
 │   ├── costs.py                  # 六：换手率、交易成本、净 Alpha、容量敏感性
@@ -395,6 +420,8 @@ portfolio-performance-evaluation/
 │   └── fake_akshare.py           #   离线模拟 akshare，测试全程不联网
 └── examples/                     # 示例：从原始净值到评价结论
     ├── quickstart.py             #   离线：第九部分演示数据 → 完整报告
+    ├── walkthrough.ipynb         #   离线 notebook：按正文顺序从原始净值走到评价结论
+    ├── config.toml               #   评价口径配置示例（逐项注释），用于 --config
     └── fund_code.md              #   联网：真实基金代码的命令与数据源替代办法
 ```
 

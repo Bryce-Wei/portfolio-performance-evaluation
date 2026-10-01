@@ -38,6 +38,17 @@ fundeval report --fund 000001 --style auto --style-window 36 \
 fundeval report --fund 110020 --factors cn_index_proxy --hac-lags 3 --use-t \
     --start 2021-01-01 --end 2025-12-31 --out 110020_factors.md
 
+# A 股四因子：再加 UMD = 沪深300动量 H30260 − 沪深300 000300（两者均为价格指数，分红口径一致）
+fundeval report --fund 110020 --factors cn_index_proxy4 --hac-lags 3 --use-t \
+    --start 2021-01-01 --end 2025-12-31 --out 110020_factors4.md
+
+# 投资美股的 QDII：French 因子库的美国市场 Carhart 四因子（美元计价，回归用因子库 RF；须月度）
+fundeval report --fund <QDII 基金代码> --factors carhart_us --hac-lags 3 --use-t \
+    --start 2021-01-01 --end 2025-12-31 --out qdii_carhart.md
+
+# 评价口径写在配置文件里，命令行显式给出的参数覆盖配置（口径写明“配置来源”）
+fundeval report --fund 110020 --config examples/config.toml --freq Q --out 110020_q.md
+
 # 不用合同基准，直接指定单个指数或“代码:权重”，指数默认换成全收益代码（000300 → H00300）
 fundeval report --fund 110011 --benchmark "000300:0.8,H11001:0.2" \
     --start 2021-01-01 --end 2025-12-31 --out 110011_custom.md
