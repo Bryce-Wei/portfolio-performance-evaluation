@@ -15,8 +15,9 @@
 | **项目文件** |  |  |  |  |
 | `README.md` | 快速开始、功能与正文对照、口径与详细用法 | — | ✅ 已完成 | #11 |
 | `CHANGELOG.md` | 更新日志 | — | ✅ 已完成 | #11 |
+| `LICENSE` | 许可证：Apache License 2.0（只覆盖本项目代码，不含第三方数据） | — | ✅ 已完成 | #13 |
 | `pyproject.toml` | 包配置与依赖；可选依赖 data / excel / plot / test | — | ✅ 已完成 | #1 |
-| `.github/workflows/tests.yml` | CI：Python 3.10–3.12 运行 pytest 与 quickstart | — | ✅ 已完成 | #2 |
+| `.github/workflows/tests.yml` | CI：Python 3.10–3.13 运行 pytest 与 quickstart | — | ✅ 已完成 | #2 #13 |
 | **docs/** |  |  |  |  |
 | `投资组合绩效评估.md` / `.docx` | 正文与 Word 修订稿 v1 | 全文 | ✅ 已完成 | 初始提交 |
 | `assets/` | 正文案例图 | 五 | ✅ 已完成 | 初始提交 |
@@ -167,7 +168,7 @@ python examples/quickstart.py --out docs/examples  # 重新生成 docs/examples 
 
 联网冒烟测试按数据源拆成独立用例（基金、东方财富指数、中证指数、中债、Shibor、国债、风格指数、French 因子库、沪深300动量 H30260），一个数据源不可达不影响其他项。东方财富指数、Shibor 与中债三项遇到连接类或超时类异常（ConnectionError、requests.Timeout、UpstreamTimeout）时跳过并注明原因，列名、格式或数值错误仍然算失败（规则见 `tests/data/akshare/README.md`）。
 
-依赖：pandas、numpy、scipy、statsmodels，Python 3.10 另需 tomli（读取 `--config` 的 TOML，3.11 起用标准库 tomllib）；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main 与 pull request 时于 Python 3.10、3.11、3.12 上运行全部测试，并单列一步执行 `examples/walkthrough.ipynb` 的测试、运行一次 `examples/quickstart.py`（均不联网），确保示例始终能跑通。
+依赖：pandas、numpy、scipy、statsmodels，Python 3.10 另需 tomli（读取 `--config` 的 TOML，3.11 起用标准库 tomllib）；可选 `data`（akshare）、`excel`（openpyxl）、`plot`（matplotlib ≥ 3.7，只在 `--charts` 时导入，未安装时提示 `pip install "fundeval[plot]"`，不影响其他功能）与 `test`（pytest）。akshare 只在使用 `fundeval.etl.sources.akshare` 时导入，未安装时报错并提示安装命令。GitHub Actions（`.github/workflows/tests.yml`）在推送到 main、pull request 与手动触发时于 Python 3.10、3.11、3.12、3.13 上运行全部测试，并单列一步执行 `examples/walkthrough.ipynb` 的测试、运行一次 `examples/quickstart.py`（均不联网），确保示例始终能跑通。
 
 ### 命令行
 
@@ -433,8 +434,9 @@ report = evaluate(
 portfolio-performance-evaluation/
 ├── README.md                     # 快速开始、功能与正文对照、口径与详细用法
 ├── CHANGELOG.md                  # 更新日志
+├── LICENSE                       # Apache License 2.0（只覆盖本项目代码）
 ├── pyproject.toml                # 包配置与依赖；可选依赖 data / excel / plot / test
-├── .github/workflows/tests.yml   # CI：Python 3.10–3.12 运行 pytest 与 quickstart
+├── .github/workflows/tests.yml   # CI：Python 3.10–3.13 运行 pytest 与 quickstart
 ├── docs/
 │   ├── 投资组合绩效评估.md       # 正文：全部方法与口径的依据
 │   ├── 投资组合绩效评估.docx     # Word 修订稿 v1
@@ -499,3 +501,11 @@ portfolio-performance-evaluation/
 ## 数据说明
 
 文章中的新增数值为教学演示，不代表真实基金业绩。原有基金案例保留其数据口径和解释边界；方法资料链接列于正文末尾。
+
+## 许可
+
+本项目可授权的代码（`src/fundeval/`、`tests/`、`examples/`）采用 [Apache License 2.0](LICENSE)。第三方内容与数据保留原有权利与归属，本许可不授予这些内容的权利：
+
+- **正文沿用的原案例**：原案例的图表与数据（如 `docs/assets/style-weights.png`）归原文作者所有。
+- **测试中摘录的真实数据**：`tests/data/akshare/` 中注明来自真实返回的部分（基金类型与业绩比较基准原文、指数名称、少量净值、分红与汇率数值，见该目录的 README），以及 `tests/test_french_factors.py` 中摘录的 French 因子库数值与用于核对的中证指数年度收益，归原数据提供方所有，只用于核对解析与计算。
+- **运行时取得的数据**：经 akshare 从东方财富、中证指数、中债、国家外汇管理局等数据源取得的数据，以及从 Kenneth R. French Data Library 下载的因子数据，不随本仓库分发，使用时应遵守各数据源的条款。

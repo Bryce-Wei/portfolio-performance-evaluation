@@ -14,6 +14,7 @@
 - 现金流识别（第一、二部分）：`clean.infer_cashflows(units, nav)` 按 ΔUnits × NAV_t 推算净申赎（流入为正）；`clean.flag_large_cashflows(flows, assets, threshold=0.05)` 标出超过资产规模一定比例的期中大额现金流，提示按发生时点拆分子期。
 - 样本长度检查（第一、四部分）：数据质量报告在样本少于 3 年（月度 36 期，或季度 12 期、周度 156 期、日度 756 期）时写明“样本较短，统计推断与能力判断受限”；频率缺省按日期间隔推断。
 - 示例 notebook `examples/walkthrough.ipynb`（第一至十部分）：不联网，用第九部分演示收益还原净值，按正文顺序演示读取与清洗 → 数据质量 → 单期收益 → 收益与风险指标 → 尾部风险 → Alpha 回归 → Brinson 单期例题 → 持续监控 → `evaluate` 报告与三段结论；联网单元集中在最后，由 `RUN_ONLINE = False` 控制。`tests/test_notebook.py` 不依赖 Jupyter，在临时目录中按顺序执行代码单元，CI 单列一步运行。
+- 许可证与 CI：新增 `LICENSE`（Apache License 2.0），只覆盖本项目可授权的代码；正文沿用的原案例、测试中摘录的真实数据与运行时取得的数据保留原有权利，见 README“许可”一节。pyproject 写明 `license = "Apache-2.0"`（PEP 639），构建依赖相应改为 setuptools ≥ 77。GitHub Actions 增加 Python 3.13（共 3.10–3.13）与手动触发，限定只读权限与 20 分钟超时，pip 缓存以 pyproject.toml 为键。#13
 
 ### 口径与限定
 
