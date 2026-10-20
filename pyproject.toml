@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]  # license 写成 SPDX 表达式（PEP 639）需要 setuptools 77 及以上
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,7 @@ name = "fundeval"
 dynamic = ["version"]
 description = "基金与投资组合绩效评估工具包，按《投资组合绩效评估》正文章节组织"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0",
